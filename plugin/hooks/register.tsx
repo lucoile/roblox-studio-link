@@ -436,6 +436,11 @@ function driftLine(drift: Drift, Text: any) {
   )
 }
 
+async function openPane($: $): Promise<void> {
+  await $.ui.open({ id: PANE, title: 'Studio', focus: true })
+  void refreshAll($)
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
@@ -496,8 +501,7 @@ export const register: Register = on => {
       await update($, isBandHidden, () => hidden)
       return { text: hidden ? 'Band hidden.' : 'Band shown when something needs attention.' }
     }
-    await $.ui.open({ id: PANE, title: 'Studio', focus: true })
-    void refreshAll($)
+    await openPane($)
     return { text: 'Studio pane opened.' }
   })
 
@@ -581,7 +585,7 @@ export const register: Register = on => {
     const entries = LIGHT_ORDER.map(([key, label]) => ({ key, label, light: lights[key] }))
     const worst = entries.reduce((a, b) => (LEVEL_RANK[b.light.level] > LEVEL_RANK[a.light.level] ? b : a))
     if (LEVEL_RANK[worst.light.level] < LEVEL_RANK.warn) return next(e)
-    const { Box, Text } = $.ui.resolve(e)
+    const { Box, Button, Text } = $.ui.resolve(e)
     return (
       <Box flexDirection="row" gap={2}>
         {entries.map(({ key, label, light }) => (
@@ -594,7 +598,7 @@ export const register: Register = on => {
             {worst.label}: {worst.light.summary}
           </Text>
         </Box>
-        <Text dimColor>/studio</Text>
+        <Button key="open" label="/studio" onPress={() => void openPane($)} />
       </Box>
     )
   })
