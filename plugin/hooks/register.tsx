@@ -111,7 +111,7 @@ async function refreshStudios($: $) {
   try {
     list = parseStudios(await mcpText($, 'list_roblox_studios', {}))
   } catch {
-    return
+    list = []
   }
   for (const studio of list) {
     try {
@@ -204,6 +204,9 @@ async function refreshBridges($: $) {
 }
 
 async function refreshAll($: $) {
+  // Tool names and server splits are cached; drop them so a reconnected MCP server is found again.
+  studioTools = {}
+  mcpSplit = {}
   await Promise.all([refreshStudios($), refreshRojo($), refreshBridges($)])
   await refreshStatus($)
 }
