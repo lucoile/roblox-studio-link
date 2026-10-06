@@ -1,0 +1,10 @@
+{
+  "name": "roblox-studio-link",
+  "version": "0.1.0",
+  "description": "Which Roblox Studio Claude is talking to, what Rojo is serving, unsaved place edits and harness bridges, in one pane.",
+  "types": "./types/index.d.ts",
+  "author": {
+    "name": "Thomas Buffard"
+  },
+  "license": "MIT"
+}

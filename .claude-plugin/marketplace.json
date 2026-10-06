@@ -1,0 +1,12 @@
+{
+  "name": "roblox-studio-link",
+  "owner": { "name": "Thomas Buffard" },
+  "description": "Claude Code mod that shows which Roblox Studio Claude targets, what Rojo serves and unsaved place edits.",
+  "plugins": [
+    {
+      "name": "roblox-studio-link",
+      "source": "./plugin",
+      "description": "Which Studio Claude targets, what Rojo serves, unsaved place edits and test harnesses, in one pane. No setup."
+    }
+  ]
+}
