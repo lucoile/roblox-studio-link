@@ -657,11 +657,13 @@ export const register: Register = on => {
             state?.hasProject && (
               <Box flexDirection="row" gap={1}>
                 {!isServingHere && (
-                  <Input
-                    key="port"
-                    placeholder={String(ROJO_PORT)}
-                    onSubmit={value => void serveHere($, value).then(message => $.ui.toast(message, { timeoutMs: 6000 }))}
-                  />
+                  <Box key="port-box" width={12} flexShrink={0}>
+                    <Input
+                      key="port"
+                      placeholder={String(ROJO_PORT)}
+                      onSubmit={value => void serveHere($, value).then(message => $.ui.toast(message, { timeoutMs: 6000 }))}
+                    />
+                  </Box>
                 )}
                 {!isServingHere && <Button key="serve" label="Serve here" hotkey="s" onPress={() => void serveHere($)} />}
                 <Button key="drift" label="Drift" hotkey="d" onPress={() => void runDrift($)} />
