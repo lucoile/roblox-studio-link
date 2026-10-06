@@ -141,7 +141,7 @@ async function refreshRojo($: $) {
     hasProject = false
   }
   const servers: RojoServer[] = []
-  for (const { pid, port } of rojoServeLines(await run($, ['ps', '-axo', 'pid=,command=']))) {
+  for (const { pid, port } of rojoServeLines(await run($, ['ps', '-axo', 'pid=,ppid=,command=']))) {
     const root = await processRoot($, pid)
     const top = root ? (await run($, ['git', 'rev-parse', '--show-toplevel'], root)).trim() || root : ''
     let projectName: string | null = null
@@ -317,16 +317,21 @@ async function startRojo($: $, root: string, port: number): Promise<string | nul
   return hasEnded ? failure ?? (output.trim() || 'rojo serve exited') : null
 }
 
-async function serveHere($: $): Promise<string> {
+async function serveHere($: $, wanted?: string): Promise<string> {
   await refreshRojo($)
   const state = await read($, rojo)
   if (!state) return 'Not in a git worktree.'
   if (!state.hasProject) return `No ${PROJECT_FILE} in ${baseName(state.here)}.`
   const existing = state.servers.find(s => s.isHere)
   if (existing) return `Rojo is already serving ${baseName(state.here)} on port ${existing.port}.`
+  const chosen = wanted?.trim() ? Number(wanted.trim()) : null
+  if (chosen !== null && (!Number.isInteger(chosen) || chosen < 1024 || chosen > 65535)) {
+    return `${wanted!.trim()} isn't a port between 1024 and 65535.`
+  }
   const tried = new Set<number>()
-  for (let attempt = 0; attempt < 5; attempt++) {
-    const port = await freePort($, tried)
+  for (let attempt = 0; attempt < (chosen === null ? 5 : 1); attempt++) {
+    if (chosen !== null && (await portInUse($, chosen))) return `Port ${chosen} is already in use.`
+    const port = chosen ?? (await freePort($, tried))
     if (port === null) return `No free port between ${ROJO_PORT} and ${ROJO_PORT + 49}.`
     tried.add(port)
     const failure = await startRojo($, state.here, port)
@@ -346,7 +351,7 @@ async function serveHere($: $): Promise<string> {
       return `rojo serve failed: ${failure.slice(0, 200)}`
     }
   }
-  return 'rojo serve kept finding its port taken; try again.'
+  return chosen === null ? 'rojo serve kept finding its port taken; try again.' : `rojo couldn't bind port ${chosen}.`
 }
 
 async function stopServer($: $, pid?: string): Promise<string> {
@@ -437,7 +442,7 @@ export const register: Register = on => {
     await $.command.register({
       name: 'studio',
       description: 'Studio targets, Rojo sync, place edits and bridges',
-      argumentHint: '[serve | stop [pid] | drift | saved | refresh | band]',
+      argumentHint: '[serve [port] | stop [pid] | drift | saved | refresh | band]',
     })
     await $.tool.register({
       name: 'bridge_command',
@@ -466,7 +471,7 @@ export const register: Register = on => {
 
   on('command.run', { command: 'studio' }, async ($, e) => {
     const [verb = '', arg] = e.args.trim().split(/\s+/)
-    if (verb === 'serve') return { text: await serveHere($) }
+    if (verb === 'serve') return { text: await serveHere($, arg) }
     if (verb === 'stop') return { text: await stopServer($, arg) }
     if (verb === 'drift') {
       const drift = await runDrift($)
@@ -595,7 +600,7 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Button, Text } = $.ui.resolve(e)
+    const { Box, Button, Input, Text } = $.ui.resolve(e)
     const list = await read($, studios)
     const lastId = await read($, lastStudio)
     const state = await read($, rojo)
@@ -667,6 +672,15 @@ export const register: Register = on => {
                 <Button key={`stop-${server.pid}`} label="Stop" onPress={() => void stopServer($, server.pid)} />
               </Box>
             ))}
+            {state?.hasProject && !isServingHere && (
+              <Input
+                key="port"
+                label="Serve on port"
+                placeholder={String(ROJO_PORT)}
+                submitLabel="serve"
+                onSubmit={value => void serveHere($, value).then(message => $.ui.toast(message, { timeoutMs: 6000 }))}
+              />
+            )}
             {state && !isServingHere && muted('here', `this worktree: ${baseName(state.here)}${state.branch ? ` (${state.branch})` : ''}`)}
             {state?.drift && driftLine(state.drift, Text)}
           </Box>

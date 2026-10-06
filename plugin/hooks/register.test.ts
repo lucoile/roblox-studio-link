@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { instanceFor, isHarnessSource, projectMappings } from './rojo'
+import { instanceFor, isHarnessSource, projectMappings, rojoServeLines } from './rojo'
 import { computeLights } from './status'
 import { isWriteCall, luauWrites, parseStudios } from './studio'
 
@@ -40,6 +40,18 @@ describe('mapping files to instances', () => {
     expect(instanceFor('src/ServerScriptService/Systems/Admin/init.luau', mappings)).toEqual(['ServerScriptService', 'Systems', 'Admin'])
     expect(instanceFor('src/ServerScriptService/Probe.server.luau', mappings)).toEqual(['ServerScriptService', 'Probe'])
     expect(instanceFor('docs/x.md', mappings)).toBe(null)
+  })
+
+  test('a rokit shim and its rojo child are one server', async () => {
+    const ps = [
+      '84107 83888 rojo serve --port 34872',
+      '84108 84107 /Users/me/.rokit/tool-storage/rojo-rbx/rojo/7.7.0/rojo serve --port 34872',
+      '90000 1 rojo serve --port 34873',
+    ].join('\n')
+    expect(rojoServeLines(ps)).toEqual([
+      { pid: '84108', port: 34872 },
+      { pid: '90000', port: 34873 },
+    ])
   })
 
   test('harness detection', async () => {

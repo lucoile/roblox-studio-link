@@ -72,16 +72,19 @@ export function bridgeLuau(harness: string, command: string, timeoutSeconds: num
   ].join('\n')
 }
 
+// `ps -axo pid=,ppid=,command=`. Rokit and aftman run a shim that spawns the real rojo with
+// the same arguments, so a server whose parent is another match is the shim's, not its own.
 export function rojoServeLines(ps: string): { pid: string; port: number }[] {
-  return ps.split('\n').flatMap(line => {
-    const match = /^\s*(\d+)\s+(.*)$/.exec(line)
+  const found = ps.split('\n').flatMap(line => {
+    const match = /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line)
     if (!match) return []
-    const pid = match[1]!
-    const command = match[2]!
+    const command = match[3]!
     if (!/(^|\/)rojo(\s|$)/.test(command) || !/\sserve(\s|$)/.test(command)) return []
     const port = Number(/--port[=\s]+(\d+)/.exec(command)?.[1] ?? ROJO_PORT)
-    return [{ pid, port }]
+    return [{ pid: match[1]!, ppid: match[2]!, port }]
   })
+  const parents = new Set(found.map(item => item.ppid))
+  return found.filter(item => !parents.has(item.pid)).map(({ pid, port }) => ({ pid, port }))
 }
 
 export function httpServerLines(ps: string): { pid: string; port: string }[] {

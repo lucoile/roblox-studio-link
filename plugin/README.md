@@ -14,7 +14,7 @@ No setup. Everything is read from the Studio MCP server, `ps`, `lsof`, `git`, Ro
 
 | Command | Does |
 | --- | --- |
-| `/studio serve` | `rojo serve` from this worktree on the first free port from 34872 |
+| `/studio serve [port]` | `rojo serve` from this worktree on the port you give, or the first free one from 34872. The pane has a "Serve on port" field too |
 | `/studio stop [pid]` | Stops this worktree's server, or the one with that pid |
 | `/studio drift` | Compares the Source of your changed scripts with the Studio copy |
 | `/studio saved` | Marks every Studio edit as saved |
