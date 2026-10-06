@@ -652,6 +652,13 @@ export const register: Register = on => {
             lights.rojo,
             state?.hasProject && (
               <Box flexDirection="row" gap={1}>
+                {!isServingHere && (
+                  <Input
+                    key="port"
+                    placeholder={String(ROJO_PORT)}
+                    onSubmit={value => void serveHere($, value).then(message => $.ui.toast(message, { timeoutMs: 6000 }))}
+                  />
+                )}
                 {!isServingHere && <Button key="serve" label="Serve here" hotkey="s" onPress={() => void serveHere($)} />}
                 <Button key="drift" label="Drift" hotkey="d" onPress={() => void runDrift($)} />
               </Box>
@@ -672,15 +679,6 @@ export const register: Register = on => {
                 <Button key={`stop-${server.pid}`} label="Stop" onPress={() => void stopServer($, server.pid)} />
               </Box>
             ))}
-            {state?.hasProject && !isServingHere && (
-              <Input
-                key="port"
-                label="Serve on port"
-                placeholder={String(ROJO_PORT)}
-                submitLabel="serve"
-                onSubmit={value => void serveHere($, value).then(message => $.ui.toast(message, { timeoutMs: 6000 }))}
-              />
-            )}
             {state && !isServingHere && muted('here', `this worktree: ${baseName(state.here)}${state.branch ? ` (${state.branch})` : ''}`)}
             {state?.drift && driftLine(state.drift, Text)}
           </Box>
