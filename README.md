@@ -5,7 +5,7 @@ Claude Code mod for Roblox projects that use Rojo and the Roblox Studio MCP serv
 ## Install
 
 ```
-claude plugin marketplace add <github-user>/roblox-studio-link
+claude plugin marketplace add lucoile/roblox-studio-link
 claude plugin install roblox-studio-link@roblox-studio-link
 ```
 
