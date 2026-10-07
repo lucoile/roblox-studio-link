@@ -12,13 +12,16 @@ import {
   rojoServeLines,
   sourceLengthsLuau,
 } from './rojo'
-import { STUDIO_TOOL, isWriteCall, parseMode, parseStudios, persistsToPlace, placeName, shortTool, summarize } from './studio'
+import { STUDIO_TOOL, isWriteCall, parseMode, parseStudios, persistsToPlace, placeName, shortTool, summarize, toolAnswer } from './studio'
 import { LEVEL_COLOR, LEVEL_RANK, baseName, computeLights, currentStudio } from './status'
 import type { Light } from './status'
+import { GREP_CAP, TREE_PORT, formatResults, grepArgs, makeQuery, parseHeader, search } from './tree'
 
 const PLUGIN = 'roblox-studio-link'
 const PANE = 'roblox-studio-link'
 const PROJECT_FILE = 'default.project.json'
+const STUDIO_PLUGIN_FILE = 'StudioTree.rbxm'
+const LIST_FAILURES_BEFORE_CLEAR = 3
 
 const studios = atom({ plugin: 'roblox-studio-link', key: 'studios' } as const, [])
 const lastStudio = atom({ plugin: 'roblox-studio-link', key: 'lastStudio' } as const, '')
@@ -41,6 +44,10 @@ let studioTools: Record<string, string> = {}
 let mcpSplit: Record<string, [string, string]> = {}
 let served: { stop: () => void; port: number } | null = null
 let editsAtTurnStart = 0
+let treeListener: { stop: () => void } | null = null
+let treeNote = ''
+let isTreeStarting = false
+let listFailures = 0
 
 async function run($: $, argv: string[], cwd?: string) {
   try {
@@ -110,7 +117,13 @@ async function refreshStudios($: $) {
   let list: StudioTarget[]
   try {
     list = parseStudios(await mcpText($, 'list_roblox_studios', {}))
-  } catch {
+    listFailures = 0
+  } catch (error) {
+    // One failed listing must not wipe the cache the write guard reads; a Studio that really
+    // went away fails every time, so clear only after several in a row.
+    listFailures++
+    $.ui.log(`list_roblox_studios failed (${listFailures}): ${String(error)}`, { to: 'debug' })
+    if (listFailures < LIST_FAILURES_BEFORE_CLEAR) return
     list = []
   }
   for (const studio of list) {
@@ -439,6 +452,138 @@ function driftLine(drift: Drift, Text: any) {
   )
 }
 
+async function treeDir($: $): Promise<string> {
+  return `${(await $.env.get('HOME')) ?? '.'}/.claude/studio-tree`
+}
+
+async function isTreeListening($: $): Promise<boolean> {
+  try {
+    const answer = await $.http.fetch(`http://127.0.0.1:${TREE_PORT}/health`)
+    return answer.ok && answer.text.trim() === 'studio-tree'
+  } catch {
+    return false
+  }
+}
+
+// One listener per machine: when another session already runs it, this one leaves it be.
+async function ensureTreeListener($: $): Promise<void> {
+  if (treeListener || isTreeStarting) return
+  isTreeStarting = true
+  try {
+    if (!(await isTreeListening($))) await startTreeListener($)
+  } finally {
+    isTreeStarting = false
+  }
+}
+
+async function startTreeListener($: $): Promise<void> {
+  const script = `${$.plugin.root}/listener/tree_listener.py`
+  let child: ReturnType<typeof $.process.spawn>
+  try {
+    child = $.process.spawn({ argv: ['python3', script, '--port', String(TREE_PORT), '--dir', await treeDir($)] })
+  } catch {
+    treeNote = 'python3 is not on PATH, so the tree listener could not start.'
+    return
+  }
+  const mine = { stop: () => void child.return(undefined as never) }
+  treeListener = mine
+  void (async () => {
+    let output = ''
+    try {
+      for await (const piece of child) {
+        output += piece.text
+        $.ui.log(piece.text.trimEnd(), { to: 'debug' })
+      }
+    } catch (error) {
+      output += String(error)
+    }
+    if (treeListener === mine) treeListener = null
+    treeNote = output.trim().split('\n').pop() ?? 'the tree listener exited'
+  })()
+}
+
+async function treePlace($: $, wanted: unknown): Promise<string> {
+  if (typeof wanted === 'string' && wanted.trim()) return wanted.trim()
+  const studio = await resolveStudio($, '')
+  if (studio?.placeId && studio.placeId !== '0') return studio.placeId
+  try {
+    const files = (await $.fs.list(await treeDir($))).filter(entry => entry.name.endsWith('.tsv'))
+    const newest = [...files].sort((a, b) => b.mtimeMs - a.mtimeMs)[0]
+    return newest ? newest.name.slice(0, -'.tsv'.length) : ''
+  } catch {
+    return ''
+  }
+}
+
+async function treeSearch($: $, args: Record<string, unknown>): Promise<{ text: string; isError: boolean }> {
+  const query = makeQuery(args)
+  const place = await treePlace($, args.place_id)
+  const dir = await treeDir($)
+  const file = `${dir}/${place}.tsv`
+  if (!place || !/^[A-Za-z0-9_-]+$/.test(place) || !(await $.fs.exists(file))) {
+    await ensureTreeListener($)
+    const listening = await isTreeListening($)
+    return {
+      isError: true,
+      text: [
+        `No tree snapshot${place ? ` for place ${place}` : ''} in ${dir}.`,
+        listening
+          ? 'The listener is running; the Studio Tree plugin in that Studio has not sent a tree yet (installed? HTTP allowed for 127.0.0.1?).'
+          : `The listener is not running${treeNote ? `: ${treeNote}` : '.'}`,
+        'Use search_game_tree with path and max_depth meanwhile.',
+      ].join(' '),
+    }
+  }
+  const argv = grepArgs(query, file)
+  if (!argv) return { isError: true, text: 'Give query, under, class_name, tag, attribute, text or group_by.' }
+  const [head, found] = await Promise.all([
+    $.process.run(['head', '-n', '1', file], { timeoutMs: 5000 }),
+    $.process.run(argv, { timeoutMs: 20000 }),
+  ])
+  if (found.exitCode > 1) return { isError: true, text: `grep failed: ${found.stderr.trim()}` }
+  const isCapped = found.isStdoutTruncated === true || found.stdout.split('\n').length > GREP_CAP
+  const result = search(found.stdout, query)
+  const header = parseHeader(head.stdout.trim())
+  const usesV2 = query.tags.length > 0 || query.attribute !== '' || query.text !== ''
+  const note =
+    header && header.version < 2 && usesV2
+      ? 'This snapshot has no tags, attributes or text yet: restart Roblox Studio so the updated Studio Tree plugin sends a new one.'
+      : ''
+  return { isError: false, text: formatResults(header, place, result, isCapped, await $.clock.now(), note) }
+}
+
+function hashText(text: string): string {
+  let hash = 0x811c9dc5
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i)
+    hash = Math.imul(hash, 0x01000193) >>> 0
+  }
+  return hash.toString(16)
+}
+
+// rojo's --plugin writes to Studio's local plugins folder; rebuilt only when the source changes.
+async function installStudioPlugin($: $, isForced: boolean): Promise<string> {
+  const project = `${$.plugin.root}/studio-plugin/plugin.project.json`
+  const source = await $.fs.read(`${$.plugin.root}/studio-plugin/StudioTree.server.luau`)
+  const hash = hashText(source)
+  const home = await $.env.get('HOME')
+  const macFile = home ? `${home}/Documents/Roblox/Plugins/${STUDIO_PLUGIN_FILE}` : ''
+  const isMissing = macFile ? !(await $.fs.exists(macFile)) : false
+  if (!isForced && !isMissing && (await $.store.get('studioPluginHash')) === hash) return ''
+  const manual = `rojo build "${project}" --plugin ${STUDIO_PLUGIN_FILE}`
+  let done: Awaited<ReturnType<typeof $.process.run>>
+  try {
+    done = await $.process.run(['rojo', 'build', project, '--plugin', STUDIO_PLUGIN_FILE], { timeoutMs: 30000 })
+  } catch {
+    return `Could not install the Studio Tree plugin: rojo is not on PATH. Run: ${manual}`
+  }
+  if (done.exitCode !== 0) {
+    return `Could not install the Studio Tree plugin (${(done.stderr || done.stdout).trim().split('\n').pop()}). Run: ${manual}`
+  }
+  await $.store.set('studioPluginHash', hash)
+  return 'Installed the Studio Tree plugin. Studio loads it on its next start if it has not already.'
+}
+
 async function openPane($: $): Promise<void> {
   await $.ui.open({ id: PANE, title: 'Studio', focus: true })
   void refreshAll($)
@@ -450,7 +595,7 @@ export const register: Register = on => {
     await $.command.register({
       name: 'studio',
       description: 'Studio targets, Rojo sync, place edits and bridges',
-      argumentHint: '[serve [port] | stop [pid] | drift | saved | refresh | band]',
+      argumentHint: '[serve [port] | stop [pid] | drift | saved | refresh | plugin | band]',
     })
     await $.tool.register({
       name: 'bridge_command',
@@ -467,13 +612,44 @@ export const register: Register = on => {
         required: ['harness', 'command'],
       },
     })
+    await $.tool.register({
+      name: 'tree_search',
+      description:
+        "Searches a snapshot of a Studio place's instance tree that the Studio Tree plugin keeps on disk, so lookups cost a few hundred tokens and no Studio round trip. Use it before search_game_tree to find where something is. query matches instance names case-insensitively, camelCase aware (\"hotbar slot\" finds HotbarSlot), any of several words by default, best match first; match picks any, all, exact, prefix or regex. under limits to a path and its descendants; with under and no filter it lists children (depth 1, raise depth for more). class_name takes class names or families (BaseScript, LuaSourceContainer, GuiObject, BasePart, ValueBase, UIComponent...), comma separated. tag, attribute and text filter on CollectionService tags, attribute names and the Text of text GUI objects. Numbered siblings (Slot_floor_1..200) collapse into one line, and matches below a match fold into it; fold false lists everything. group_by class or parent returns counts instead of rows. Rows are path, ClassName and child count; tag, attribute and text filters add what they matched, details adds tags, attribute names, text and script line counts to every row. The first line says how old the snapshot is: edits reach it within seconds, but confirm with inspect_instance before writing.",
+      inputSchema: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Name keywords, separated by spaces or commas (a regular expression when match is regex)' },
+          match: { type: 'string', enum: ['any', 'all', 'exact', 'prefix', 'regex'], description: 'How query matches names; default any word' },
+          under: { type: 'string', description: 'Dot path to search under, e.g. StarterGui.MainHUD' },
+          class_name: { type: 'string', description: 'ClassName or family to keep, comma separated, e.g. Frame, BaseScript, GuiObject' },
+          tag: { type: 'string', description: 'CollectionService tag, comma separated for any of several' },
+          attribute: { type: 'string', description: 'Part of an attribute name the instance has' },
+          text: { type: 'string', description: 'Part of the Text of a TextLabel, TextButton or TextBox' },
+          depth: { type: 'number', description: 'Levels below under (or below the root) to include; default 1 when only under is given, unlimited once any filter is' },
+          fold: { type: 'boolean', description: 'Collapse numbered siblings and fold matches below a match; default true' },
+          group_by: { type: 'string', enum: ['class', 'parent'], description: 'Return counts per class or per parent instead of rows' },
+          details: { type: 'boolean', description: 'Show tags, attribute names, text and script line counts on every row; default only what a filter asked for' },
+          place_id: { type: 'string', description: 'Place to search; defaults to the Studio last targeted, else the newest snapshot' },
+          limit: { type: 'number', description: 'Rows to return; default 50, max 500' },
+        },
+      },
+    })
     void refreshAll($)
-    $.clock.every(20000, () => void refreshAll($))
+    void ensureTreeListener($)
+    void installStudioPlugin($, false)
+      .then(note => note && $.ui.toast(note, { timeoutMs: 8000 }))
+      .catch(error => $.ui.log(`Studio Tree plugin install: ${String(error)}`, { to: 'debug' }))
+    $.clock.every(20000, () => {
+      void refreshAll($)
+      void ensureTreeListener($)
+    })
     return started
   })
 
   on('session.end', ($, e, next) => {
     served?.stop()
+    treeListener?.stop()
     return next(e)
   })
 
@@ -499,6 +675,7 @@ export const register: Register = on => {
       await refreshAll($)
       return { text: 'Refreshed Studio, Rojo and bridges.' }
     }
+    if (verb === 'plugin') return { text: await installStudioPlugin($, true) }
     if (verb === 'band') {
       const hidden = !(await read($, isBandHidden))
       await update($, isBandHidden, () => hidden)
@@ -554,9 +731,18 @@ export const register: Register = on => {
         datamodel_type: 'Server',
         code: bridgeLuau(String(args.harness), String(args.command), timeout),
       })
-      return { result: { content: [{ type: 'text', text }] } }
+      return toolAnswer(text)
     } catch (error) {
-      return { result: { content: [{ type: 'text', text: `Bridge call failed: ${String(error)}` }], isError: true } }
+      return toolAnswer(`Bridge call failed: ${String(error)}`, true)
+    }
+  })
+
+  on('tool.call', { tool: `mcp__${PLUGIN}__tree_search` }, async ($, e) => {
+    try {
+      const { text, isError } = await treeSearch($, e as unknown as Record<string, unknown>)
+      return toolAnswer(text, isError)
+    } catch (error) {
+      return toolAnswer(`Tree search failed: ${String(error)}`, true)
     }
   })
 

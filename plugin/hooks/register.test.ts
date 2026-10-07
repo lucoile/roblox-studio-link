@@ -2,7 +2,7 @@ import { describe, expect, test } from 'claude-code/testing'
 
 import { instanceFor, isHarnessSource, projectMappings, rojoServeLines } from './rojo'
 import { computeLights } from './status'
-import { isWriteCall, luauWrites, parseStudios } from './studio'
+import { isWriteCall, luauWrites, parseStudios, toolAnswer } from './studio'
 
 const ONE_STUDIO = JSON.stringify({ studios: [{ id: 'a-1', name: 'My Game (placeId: 111)' }] })
 
@@ -99,6 +99,13 @@ describe('edits and the pane', () => {
       expect(await band.find({ type: 'Text', text: 'Edits: 1 unsaved · My Game' })).toBeDefined()
       await band.unmount()
     }
+  })
+})
+
+describe('answering as a registered tool', () => {
+  test('a string result, or a deny for an error, never a content object', async () => {
+    expect(toolAnswer('rows')).toEqual({ result: 'rows' })
+    expect(toolAnswer('no snapshot', true)).toEqual({ deny: 'no snapshot' })
   })
 })
 

@@ -1,0 +1,85 @@
+import gzip
+import http.client
+import os
+import tempfile
+import threading
+import unittest
+from http.server import ThreadingHTTPServer
+
+import tree_listener
+
+FULL = (
+    "# studio-tree 2\tplace=1\tname=P\tat=10\tcount=4\n"
+    "ServerStorage\tServerStorage\t2\t1\t13\t\t\t\t\n"
+    "ServerStorage.A\tFolder\t1\t2\t1\t\t\t\t\n"
+    "ServerStorage.A.X\tPart\t0\t3\t1\t\t\t\t\n"
+    "ServerStorage.AB\tFolder\t0\t2\t2\t\t\t\t\n"
+)
+DELTA = (
+    "# studio-tree 2\tplace=1\tname=P\tat=20\tcount=2\tmode=delta\troots=ServerStorage.A\n"
+    "ServerStorage.A\tFolder\t1\t2\t1\t\t\t\t\n"
+    "ServerStorage.A.Y\tPart\t0\t3\t1\t\t\t\t\n"
+)
+
+
+class ListenerTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        tree_listener.Handler.out_dir = self.dir.name
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), tree_listener.Handler)
+        self.port = self.server.server_address[1]
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.dir.cleanup()
+
+    def post(self, body, place="1", gz=True):
+        data = gzip.compress(body.encode()) if gz else body.encode()
+        conn = http.client.HTTPConnection("127.0.0.1", self.port)
+        conn.request("POST", f"/tree?place={place}", data, {"X-Studio-Tree": "1"})
+        status = conn.getresponse().status
+        conn.close()
+        return status
+
+    def stored(self, place="1"):
+        with open(os.path.join(self.dir.name, f"{place}.tsv"), encoding="utf-8") as handle:
+            return handle.read()
+
+    def test_full_snapshot_is_stored_as_sent(self):
+        self.assertEqual(self.post(FULL), 204)
+        self.assertEqual(self.stored(), FULL)
+
+    def test_delta_replaces_only_rows_under_its_root(self):
+        self.post(FULL)
+        self.assertEqual(self.post(DELTA), 204)
+        rows = [line.split("\t")[0] for line in self.stored().splitlines()[1:]]
+        # ServerStorage.AB shares a prefix with the root but is not under it.
+        self.assertEqual(sorted(rows), ["ServerStorage", "ServerStorage.A", "ServerStorage.A.Y", "ServerStorage.AB"])
+        head = self.stored().splitlines()[0]
+        self.assertIn("at=20", head)
+        self.assertIn("count=4", head)
+        self.assertNotIn("mode=", head)
+
+    def test_delta_with_no_roots_rows_removes_the_root(self):
+        self.post(FULL)
+        gone = "# studio-tree 2\tplace=1\tname=P\tat=30\tcount=0\tmode=delta\troots=ServerStorage.A\n"
+        self.assertEqual(self.post(gone), 204)
+        rows = [line.split("\t")[0] for line in self.stored().splitlines()[1:]]
+        self.assertEqual(rows, ["ServerStorage", "ServerStorage.AB"])
+
+    def test_delta_without_a_snapshot_asks_for_the_whole_tree(self):
+        self.assertEqual(self.post(DELTA, place="2"), 409)
+
+    def test_delta_against_another_version_asks_for_the_whole_tree(self):
+        self.post(FULL.replace("studio-tree 2", "studio-tree 1"))
+        self.assertEqual(self.post(DELTA), 409)
+
+    def test_rejects_garbage(self):
+        self.assertEqual(self.post("hello"), 400)
+        self.assertEqual(self.post("# studio-tree 2\tplace=1\tmode=delta\n"), 400)
+
+
+if __name__ == "__main__":
+    unittest.main()
