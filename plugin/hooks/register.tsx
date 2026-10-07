@@ -12,7 +12,7 @@ import {
   rojoServeLines,
   sourceLengthsLuau,
 } from './rojo'
-import { STUDIO_TOOL, isWriteCall, parseMode, parseStudios, persistsToPlace, placeName, shortTool, summarize } from './studio'
+import { STUDIO_TOOL, isWriteCall, parseMode, parseStudios, persistsToPlace, placeName, shortTool, summarize, toolAnswer } from './studio'
 import { LEVEL_COLOR, LEVEL_RANK, baseName, computeLights, currentStudio } from './status'
 import type { Light } from './status'
 import { GREP_CAP, TREE_PORT, formatResults, grepArgs, makeQuery, parseHeader, search } from './tree'
@@ -731,18 +731,18 @@ export const register: Register = on => {
         datamodel_type: 'Server',
         code: bridgeLuau(String(args.harness), String(args.command), timeout),
       })
-      return { result: { content: [{ type: 'text', text }] } }
+      return toolAnswer(text)
     } catch (error) {
-      return { result: { content: [{ type: 'text', text: `Bridge call failed: ${String(error)}` }], isError: true } }
+      return toolAnswer(`Bridge call failed: ${String(error)}`, true)
     }
   })
 
   on('tool.call', { tool: `mcp__${PLUGIN}__tree_search` }, async ($, e) => {
     try {
       const { text, isError } = await treeSearch($, e as unknown as Record<string, unknown>)
-      return { result: { content: [{ type: 'text', text }], isError } }
+      return toolAnswer(text, isError)
     } catch (error) {
-      return { result: { content: [{ type: 'text', text: `Tree search failed: ${String(error)}` }], isError: true } }
+      return toolAnswer(`Tree search failed: ${String(error)}`, true)
     }
   })
 

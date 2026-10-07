@@ -85,3 +85,9 @@ export function parseMode(text: string): string | null {
 export function placeName(studio: StudioTarget): string {
   return studio.name.replace(/\s*\(placeId:.*\)\s*$/, '')
 }
+
+// A registered tool answers with a string; an error goes out as a deny, which the model reads as one.
+// An object result such as { content: [...] } is refused by the engine.
+export function toolAnswer(text: string, isError = false): { result: string } | { deny: string } {
+  return isError ? { deny: text } : { result: text }
+}
