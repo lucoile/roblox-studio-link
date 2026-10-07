@@ -50,9 +50,15 @@ The `execute_luau` write check is a pattern match on the code, so it errs toward
 ## Tree search
 
 A Studio plugin keeps a snapshot of each open place's instance tree on disk, and the
-`tree_search` tool searches it. A lookup costs a few hundred tokens and no Studio round trip,
-where walking a large place through `search_game_tree` takes several calls of up to ~10k
-tokens each.
+`tree_search` tool searches it. It needs no Studio round trip, answers when Studio is
+busy, and returns fewer tokens than `search_game_tree` (numbers below).
+
+```
+Studio Tree plugin --HTTP--> listener (127.0.0.1:34950) --> ~/.claude/studio-tree/<placeId>.tsv <-- tree_search
+```
+
+The link between the mod and Studio is set up for you: the mod builds and installs the Studio
+plugin and starts the listener, so after the first Studio restart there is nothing to configure.
 
 - **Studio Tree plugin** (`plugin/studio-plugin/`): sends the tree from edit mode when the
   place loads, and again 3 s after adds, removes or a recorded edit (renames, moves) stop. It
@@ -67,11 +73,38 @@ tokens each.
   Claude Code closed arrives when it opens.
 - **`tree_search`** (tool): `query` matches names (any of several words), `under` limits to
   a path, `class_name` to a class, `depth` to levels below. With `under` alone it lists
-  children. It defaults to the Studio Claude last targeted and starts its answer with the
+  children; with a query or `class_name` it searches every level. It defaults to the Studio Claude last targeted and starts its answer with the
   snapshot's age.
 
 Each line of a snapshot is `path<TAB>ClassName<TAB>childCount`, so `Grep` works on the
 file too. It is for finding things: confirm with `inspect_instance` before a write.
+
+### Token savings
+
+Measured on a 37,069-instance place, against `search_game_tree` called the way an agent would
+(`keywords`, `instance_type`, `path`, `max_depth`; its default cap is 200 nodes). Sizes are the
+characters of the tool result, tokens are chars / 4.
+
+| Task | `search_game_tree` | `tree_search` | Saved |
+| --- | --- | --- | --- |
+| find `hotbar` anywhere (14 hits) | 2,056 | 1,287 | 1.6x |
+| find `hotbar slot` anywhere | 27,105 (capped) | 3,782 (50 of 537) | 7.2x |
+| ModuleScript named `janitor` | 473 | 229 | 2.1x |
+| children of `StarterGui.MainHUD` | 1,125 | 364 | 3.1x |
+| every `ScreenGui` (25) | 3,205 | 1,687 | 1.9x |
+| every ModuleScript in `ServerScriptService` | 26,134 (capped) | 3,823 (50 of 241) | 6.8x |
+| find `button` anywhere (broad) | 33,732 (capped) | 3,940 (50 of 151) | 8.6x |
+| `perk` inside `StarterGui` | 313 | 277 | 1.1x |
+| 2 levels of `ReplicatedStorage.Assets` | 34,883 (capped) | 3,418 (50 of 208) | 10.2x |
+| 2 levels of `ServerScriptService` | 14,489 | 2,796 (50 of 113) | 5.2x |
+| **Total** | **~35,900 tokens** | **~5,400 tokens** | **6.6x** (median 4.1x) |
+
+Where the saving comes from: a row is about 2x smaller (`path  Class  (n children)` against a
+JSON object with `parentName`, `fullPath`, `name` and `className`), and `tree_search` returns
+50 rows unless you raise `limit`. With `limit: 200` the same tasks come to 2.3x overall, so the
+rest of the gap is the smaller default. Small, exact lookups gain little (1.1x to 3x); broad
+ones gain most. Both tools truncate broad results, so narrow with `under` or `class_name`.
+Rerun the numbers on your own place before leaning on them.
 
 ## Replaces `studio-link`
 

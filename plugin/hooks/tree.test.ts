@@ -13,6 +13,12 @@ const TREE = [
 ].join('\n')
 
 describe('searching a tree snapshot', () => {
+  test('class_name alone searches at any depth, under alone lists children', async () => {
+    expect(makeQuery({ class_name: 'Frame' }).depth).toBe(null)
+    expect(makeQuery({ under: 'StarterGui', class_name: 'Frame' }).depth).toBe(null)
+    expect(makeQuery({ under: 'StarterGui' }).depth).toBe(1)
+  })
+
   test('a query matches names at any depth, not their ancestors', async () => {
     const found = search(TREE, makeQuery({ query: 'hotbar' }))
     expect(found.rows.map(row => row.path)).toEqual(['StarterGui.MainHUD.Hotbar', 'StarterGui.BookMenu.Book.Perks.HotbarSlots'])

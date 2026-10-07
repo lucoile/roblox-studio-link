@@ -21,6 +21,7 @@ const PLUGIN = 'roblox-studio-link'
 const PANE = 'roblox-studio-link'
 const PROJECT_FILE = 'default.project.json'
 const STUDIO_PLUGIN_FILE = 'StudioTree.rbxm'
+const LIST_FAILURES_BEFORE_CLEAR = 3
 
 const studios = atom({ plugin: 'roblox-studio-link', key: 'studios' } as const, [])
 const lastStudio = atom({ plugin: 'roblox-studio-link', key: 'lastStudio' } as const, '')
@@ -46,6 +47,7 @@ let editsAtTurnStart = 0
 let treeListener: { stop: () => void } | null = null
 let treeNote = ''
 let isTreeStarting = false
+let listFailures = 0
 
 async function run($: $, argv: string[], cwd?: string) {
   try {
@@ -115,7 +117,13 @@ async function refreshStudios($: $) {
   let list: StudioTarget[]
   try {
     list = parseStudios(await mcpText($, 'list_roblox_studios', {}))
-  } catch {
+    listFailures = 0
+  } catch (error) {
+    // One failed listing must not wipe the cache the write guard reads; a Studio that really
+    // went away fails every time, so clear only after several in a row.
+    listFailures++
+    $.ui.log(`list_roblox_studios failed (${listFailures}): ${String(error)}`, { to: 'debug' })
+    if (listFailures < LIST_FAILURES_BEFORE_CLEAR) return
     list = []
   }
   for (const studio of list) {
@@ -608,7 +616,7 @@ export const register: Register = on => {
           query: { type: 'string', description: 'Name keywords, separated by spaces or commas; any one matches' },
           under: { type: 'string', description: 'Dot path to search under, e.g. StarterGui.MainHUD' },
           class_name: { type: 'string', description: 'Exact ClassName to keep, e.g. Frame' },
-          depth: { type: 'number', description: 'Levels below under (or below the root) to include; default 1 without query, unlimited with one' },
+          depth: { type: 'number', description: 'Levels below under (or below the root) to include; default 1 when only under is given, unlimited once query or class_name is' },
           place_id: { type: 'string', description: 'Place to search; defaults to the Studio last targeted, else the newest snapshot' },
           limit: { type: 'number', description: 'Rows to return; default 50, max 500' },
         },

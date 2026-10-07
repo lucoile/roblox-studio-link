@@ -48,10 +48,11 @@ export function makeQuery(args: Record<string, unknown>): TreeQuery {
   const under = String(args.under ?? '')
     .trim()
     .replace(/^game\./, '')
+  const className = String(args.class_name ?? '').trim()
   const rawDepth = args.depth === undefined ? null : Number(args.depth)
-  const depth = rawDepth !== null && Number.isFinite(rawDepth) ? Math.max(1, Math.floor(rawDepth)) : words.length ? null : 1
+  const depth = rawDepth !== null && Number.isFinite(rawDepth) ? Math.max(1, Math.floor(rawDepth)) : words.length || className ? null : 1
   const limit = Math.min(500, Math.max(1, Math.floor(Number(args.limit ?? 50)) || 50))
-  return { words, under, className: String(args.class_name ?? '').trim(), depth, limit }
+  return { words, under, className, depth, limit }
 }
 
 // grep narrows the file before the rows cross into the plugin; matches() is the real filter.
