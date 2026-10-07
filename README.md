@@ -16,6 +16,9 @@ Needs a Claude Code build with mods (plugin hooks modules) and the Roblox Studio
 
 No setup for the pane: everything is read from the Studio MCP server, `ps`, `lsof`, `git`, Rojo's `/api/rojo` and your `default.project.json`.
 
+Tree search also needs `rojo` on PATH (the mod builds the Studio plugin with it), `python3`,
+and one Studio restart after the first install or an update. See [Tree search](#tree-search).
+
 ## Use it
 
 `/studio` opens the pane. Click a button once, or press its letter (`s` serve, `d` drift,
@@ -53,6 +56,10 @@ The band above the prompt appears only when a light is yellow or red.
   (`Allow once`, `Allow for this session`, `Block`). With one Studio open it never asks.
 - `bridge_command` (tool) sets a harness's `Command` attribute and waits for `Seq`,
   returning `Result`. Needs play mode.
+- `tree_search` (tool) searches a snapshot of the place's instance tree kept on disk: ranked
+  name matches, class families, tags, attributes, text and counts. See [Tree search](#tree-search).
+- A failed listing of the open Studios keeps the last known list and only clears it after
+  three failures in a row, so one hiccup does not make the guard refuse an open Studio.
 
 The `execute_luau` write check is a pattern match on the code, so it errs towards asking.
 
