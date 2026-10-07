@@ -15,6 +15,7 @@ import {
 import { STUDIO_TOOL, isWriteCall, parseMode, parseStudios, persistsToPlace, placeName, shortTool, summarize } from './studio'
 import { LEVEL_COLOR, LEVEL_RANK, baseName, computeLights, currentStudio } from './status'
 import type { Light } from './status'
+import { GREP_CAP, TREE_PORT, formatResults, grepArgs, makeQuery, parseHeader, search } from './tree'
 
 const PLUGIN = 'roblox-studio-link'
 const PANE = 'roblox-studio-link'
@@ -41,6 +42,9 @@ let studioTools: Record<string, string> = {}
 let mcpSplit: Record<string, [string, string]> = {}
 let served: { stop: () => void; port: number } | null = null
 let editsAtTurnStart = 0
+let treeListener: { stop: () => void } | null = null
+let treeNote = ''
+let isTreeStarting = false
 
 async function run($: $, argv: string[], cwd?: string) {
   try {
@@ -439,6 +443,100 @@ function driftLine(drift: Drift, Text: any) {
   )
 }
 
+async function treeDir($: $): Promise<string> {
+  return `${(await $.env.get('HOME')) ?? '.'}/.claude/studio-tree`
+}
+
+async function isTreeListening($: $): Promise<boolean> {
+  try {
+    const answer = await $.http.fetch(`http://127.0.0.1:${TREE_PORT}/health`)
+    return answer.ok && answer.text.trim() === 'studio-tree'
+  } catch {
+    return false
+  }
+}
+
+// One listener per machine: when another session already runs it, this one leaves it be.
+async function ensureTreeListener($: $): Promise<void> {
+  if (treeListener || isTreeStarting) return
+  isTreeStarting = true
+  try {
+    if (!(await isTreeListening($))) await startTreeListener($)
+  } finally {
+    isTreeStarting = false
+  }
+}
+
+async function startTreeListener($: $): Promise<void> {
+  const script = `${$.plugin.root}/listener/tree_listener.py`
+  let child: ReturnType<typeof $.process.spawn>
+  try {
+    child = $.process.spawn({ argv: ['python3', script, '--port', String(TREE_PORT), '--dir', await treeDir($)] })
+  } catch {
+    treeNote = 'python3 is not on PATH, so the tree listener could not start.'
+    return
+  }
+  const mine = { stop: () => void child.return(undefined as never) }
+  treeListener = mine
+  void (async () => {
+    let output = ''
+    try {
+      for await (const piece of child) {
+        output += piece.text
+        $.ui.log(piece.text.trimEnd(), { to: 'debug' })
+      }
+    } catch (error) {
+      output += String(error)
+    }
+    if (treeListener === mine) treeListener = null
+    treeNote = output.trim().split('\n').pop() ?? 'the tree listener exited'
+  })()
+}
+
+async function treePlace($: $, wanted: unknown): Promise<string> {
+  if (typeof wanted === 'string' && wanted.trim()) return wanted.trim()
+  const studio = await resolveStudio($, '')
+  if (studio?.placeId && studio.placeId !== '0') return studio.placeId
+  try {
+    const files = (await $.fs.list(await treeDir($))).filter(entry => entry.name.endsWith('.tsv'))
+    const newest = [...files].sort((a, b) => b.mtimeMs - a.mtimeMs)[0]
+    return newest ? newest.name.slice(0, -'.tsv'.length) : ''
+  } catch {
+    return ''
+  }
+}
+
+async function treeSearch($: $, args: Record<string, unknown>): Promise<{ text: string; isError: boolean }> {
+  const query = makeQuery(args)
+  const place = await treePlace($, args.place_id)
+  const dir = await treeDir($)
+  const file = `${dir}/${place}.tsv`
+  if (!place || !/^[A-Za-z0-9_-]+$/.test(place) || !(await $.fs.exists(file))) {
+    await ensureTreeListener($)
+    const listening = await isTreeListening($)
+    return {
+      isError: true,
+      text: [
+        `No tree snapshot${place ? ` for place ${place}` : ''} in ${dir}.`,
+        listening
+          ? 'The listener is running; the Studio Tree plugin in that Studio has not sent a tree yet (installed? HTTP allowed for 127.0.0.1?).'
+          : `The listener is not running${treeNote ? `: ${treeNote}` : '.'}`,
+        'Use search_game_tree with path and max_depth meanwhile.',
+      ].join(' '),
+    }
+  }
+  const argv = grepArgs(query, file)
+  if (!argv) return { isError: true, text: 'Give query, under or class_name.' }
+  const [head, found] = await Promise.all([
+    $.process.run(['head', '-n', '1', file], { timeoutMs: 5000 }),
+    $.process.run(argv, { timeoutMs: 20000 }),
+  ])
+  if (found.exitCode > 1) return { isError: true, text: `grep failed: ${found.stderr.trim()}` }
+  const isCapped = found.isStdoutTruncated === true || found.stdout.split('\n').length > GREP_CAP
+  const result = search(found.stdout, query)
+  return { isError: false, text: formatResults(parseHeader(head.stdout.trim()), place, result, isCapped, await $.clock.now()) }
+}
+
 async function openPane($: $): Promise<void> {
   await $.ui.open({ id: PANE, title: 'Studio', focus: true })
   void refreshAll($)
@@ -467,13 +565,34 @@ export const register: Register = on => {
         required: ['harness', 'command'],
       },
     })
+    await $.tool.register({
+      name: 'tree_search',
+      description:
+        "Searches a snapshot of a Studio place's instance tree that the Studio Tree plugin keeps on disk, so lookups cost a few hundred tokens and no Studio round trip. Use it before search_game_tree to find where something is. query matches instance names (case-insensitive, any of several words); under limits to a path and its descendants; with under and no query it lists children (depth 1, raise depth for more). Rows are path, ClassName and child count. The first line says how old the snapshot is: hand edits reach it within seconds, but confirm with inspect_instance before writing.",
+      inputSchema: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Name keywords, separated by spaces or commas; any one matches' },
+          under: { type: 'string', description: 'Dot path to search under, e.g. StarterGui.MainHUD' },
+          class_name: { type: 'string', description: 'Exact ClassName to keep, e.g. Frame' },
+          depth: { type: 'number', description: 'Levels below under (or below the root) to include; default 1 without query, unlimited with one' },
+          place_id: { type: 'string', description: 'Place to search; defaults to the Studio last targeted, else the newest snapshot' },
+          limit: { type: 'number', description: 'Rows to return; default 50, max 500' },
+        },
+      },
+    })
     void refreshAll($)
-    $.clock.every(20000, () => void refreshAll($))
+    void ensureTreeListener($)
+    $.clock.every(20000, () => {
+      void refreshAll($)
+      void ensureTreeListener($)
+    })
     return started
   })
 
   on('session.end', ($, e, next) => {
     served?.stop()
+    treeListener?.stop()
     return next(e)
   })
 
@@ -557,6 +676,15 @@ export const register: Register = on => {
       return { result: { content: [{ type: 'text', text }] } }
     } catch (error) {
       return { result: { content: [{ type: 'text', text: `Bridge call failed: ${String(error)}` }], isError: true } }
+    }
+  })
+
+  on('tool.call', { tool: `mcp__${PLUGIN}__tree_search` }, async ($, e) => {
+    try {
+      const { text, isError } = await treeSearch($, e as unknown as Record<string, unknown>)
+      return { result: { content: [{ type: 'text', text }], isError } }
+    } catch (error) {
+      return { result: { content: [{ type: 'text', text: `Tree search failed: ${String(error)}` }], isError: true } }
     }
   })
 

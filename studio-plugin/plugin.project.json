@@ -1,0 +1,6 @@
+{
+  "name": "StudioTree",
+  "tree": {
+    "$path": "StudioTree.server.luau"
+  }
+}
