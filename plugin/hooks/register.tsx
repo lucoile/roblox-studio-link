@@ -535,7 +535,7 @@ async function treeSearch($: $, args: Record<string, unknown>): Promise<{ text: 
     }
   }
   const argv = grepArgs(query, file)
-  if (!argv) return { isError: true, text: 'Give query, under or class_name.' }
+  if (!argv) return { isError: true, text: 'Give query, under, class_name, tag, attribute, text or group_by.' }
   const [head, found] = await Promise.all([
     $.process.run(['head', '-n', '1', file], { timeoutMs: 5000 }),
     $.process.run(argv, { timeoutMs: 20000 }),
@@ -543,7 +543,13 @@ async function treeSearch($: $, args: Record<string, unknown>): Promise<{ text: 
   if (found.exitCode > 1) return { isError: true, text: `grep failed: ${found.stderr.trim()}` }
   const isCapped = found.isStdoutTruncated === true || found.stdout.split('\n').length > GREP_CAP
   const result = search(found.stdout, query)
-  return { isError: false, text: formatResults(parseHeader(head.stdout.trim()), place, result, isCapped, await $.clock.now()) }
+  const header = parseHeader(head.stdout.trim())
+  const usesV2 = query.tags.length > 0 || query.attribute !== '' || query.text !== ''
+  const note =
+    header && header.version < 2 && usesV2
+      ? 'This snapshot has no tags, attributes or text yet: restart Roblox Studio so the updated Studio Tree plugin sends a new one.'
+      : ''
+  return { isError: false, text: formatResults(header, place, result, isCapped, await $.clock.now(), note) }
 }
 
 function hashText(text: string): string {
@@ -609,14 +615,21 @@ export const register: Register = on => {
     await $.tool.register({
       name: 'tree_search',
       description:
-        "Searches a snapshot of a Studio place's instance tree that the Studio Tree plugin keeps on disk, so lookups cost a few hundred tokens and no Studio round trip. Use it before search_game_tree to find where something is. query matches instance names (case-insensitive, any of several words); under limits to a path and its descendants; with under and no query it lists children (depth 1, raise depth for more). Rows are path, ClassName and child count. The first line says how old the snapshot is: hand edits reach it within seconds, but confirm with inspect_instance before writing.",
+        "Searches a snapshot of a Studio place's instance tree that the Studio Tree plugin keeps on disk, so lookups cost a few hundred tokens and no Studio round trip. Use it before search_game_tree to find where something is. query matches instance names case-insensitively, camelCase aware (\"hotbar slot\" finds HotbarSlot), any of several words by default, best match first; match picks any, all, exact, prefix or regex. under limits to a path and its descendants; with under and no filter it lists children (depth 1, raise depth for more). class_name takes class names or families (BaseScript, LuaSourceContainer, GuiObject, BasePart, ValueBase, UIComponent...), comma separated. tag, attribute and text filter on CollectionService tags, attribute names and the Text of text GUI objects. Numbered siblings (Slot_floor_1..200) collapse into one line, and matches below a match fold into it; fold false lists everything. group_by class or parent returns counts instead of rows. Rows are path, ClassName and child count; tag, attribute and text filters add what they matched, details adds tags, attribute names, text and script line counts to every row. The first line says how old the snapshot is: edits reach it within seconds, but confirm with inspect_instance before writing.",
       inputSchema: {
         type: 'object',
         properties: {
-          query: { type: 'string', description: 'Name keywords, separated by spaces or commas; any one matches' },
+          query: { type: 'string', description: 'Name keywords, separated by spaces or commas (a regular expression when match is regex)' },
+          match: { type: 'string', enum: ['any', 'all', 'exact', 'prefix', 'regex'], description: 'How query matches names; default any word' },
           under: { type: 'string', description: 'Dot path to search under, e.g. StarterGui.MainHUD' },
-          class_name: { type: 'string', description: 'Exact ClassName to keep, e.g. Frame' },
-          depth: { type: 'number', description: 'Levels below under (or below the root) to include; default 1 when only under is given, unlimited once query or class_name is' },
+          class_name: { type: 'string', description: 'ClassName or family to keep, comma separated, e.g. Frame, BaseScript, GuiObject' },
+          tag: { type: 'string', description: 'CollectionService tag, comma separated for any of several' },
+          attribute: { type: 'string', description: 'Part of an attribute name the instance has' },
+          text: { type: 'string', description: 'Part of the Text of a TextLabel, TextButton or TextBox' },
+          depth: { type: 'number', description: 'Levels below under (or below the root) to include; default 1 when only under is given, unlimited once any filter is' },
+          fold: { type: 'boolean', description: 'Collapse numbered siblings and fold matches below a match; default true' },
+          group_by: { type: 'string', enum: ['class', 'parent'], description: 'Return counts per class or per parent instead of rows' },
+          details: { type: 'boolean', description: 'Show tags, attribute names, text and script line counts on every row; default only what a filter asked for' },
           place_id: { type: 'string', description: 'Place to search; defaults to the Studio last targeted, else the newest snapshot' },
           limit: { type: 'number', description: 'Rows to return; default 50, max 500' },
         },
