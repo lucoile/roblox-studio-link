@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { formatResults, grepArgs, makeQuery, normalizeName, parseHeader, search } from './tree'
+import { describeSnapshots, formatResults, grepArgs, makeQuery, normalizeName, parseHeader, parseSnapshotName, pickSnapshot, placeKeyOf, search } from './tree'
 
 const TREE = [
   '# studio-tree 1\tplace=111\tname=My Game\tat=1000\tcount=6',
@@ -175,5 +175,63 @@ describe('prefiltering with grep', () => {
     expect(grepArgs(makeQuery({ under: 'Workspace' }), 'f')).toEqual(['grep', '-m', '100000', '-E', '-e', '^Workspace[.\t]', '--', 'f'])
     expect(grepArgs(makeQuery({ query: '^a', match: 'regex' }), 'f')).toEqual(['grep', '-m', '100000', '-v', '-e', '^#', '--', 'f'])
     expect(grepArgs(makeQuery({}), 'f')).toBe(null)
+  })
+})
+
+describe('choosing a snapshot file', () => {
+  const now = 1_000_000_000
+  const file = (name: string, ageSeconds: number) => ({ name, mtimeMs: now - ageSeconds * 1000 })
+
+  test('names with and without a session are told apart', async () => {
+    expect(parseSnapshotName(file('111.tsv', 0))).toEqual({ file: '111.tsv', place: '111', session: '', mtimeMs: now })
+    expect(parseSnapshotName(file('local-My_Game.ab12cd34.tsv', 5))?.session).toBe('ab12cd34')
+    expect(parseSnapshotName(file('listener.log', 0))).toBe(null)
+    expect(parseSnapshotName(file('.snapshot.x.tmp', 0))).toBe(null)
+  })
+
+  test('unsaved places key on their name the way the plugin does', async () => {
+    expect(placeKeyOf('111', 'Whatever')).toBe('111')
+    expect(placeKeyOf('0', 'My Game!')).toBe('local-My_Game_')
+    expect(placeKeyOf(null, 'Caf\u00e9')).toBe('local-Caf__')
+    expect(placeKeyOf('0', 'x'.repeat(100)).length).toBe('local-'.length + 60)
+  })
+
+  test('one open Studio on a place gives its file, no note', async () => {
+    const pick = pickSnapshot([file('111.aaaaaaaa.tsv', 10), file('222.bbbbbbbb.tsv', 5)], '111', now)
+    expect(pick.ref?.file).toBe('111.aaaaaaaa.tsv')
+    expect(pick.note).toBe('')
+  })
+
+  test('two Studios on one place: the newest wins and the answer says so', async () => {
+    const pick = pickSnapshot([file('111.aaaaaaaa.tsv', 60), file('111.bbbbbbbb.tsv', 4)], '111', now)
+    expect(pick.ref?.session).toBe('bbbbbbbb')
+    expect(pick.note).toContain('2 Studios have this place open')
+    expect(pick.note).toContain('aaaaaaaa')
+  })
+
+  test('a Studio that went quiet does not count as open', async () => {
+    const pick = pickSnapshot([file('111.aaaaaaaa.tsv', 3600), file('111.bbbbbbbb.tsv', 4)], '111', now)
+    expect(pick.ref?.session).toBe('bbbbbbbb')
+    expect(pick.note).toBe('')
+  })
+
+  test('with only a stale or unsessioned file it is still used, and a session picks exactly', async () => {
+    expect(pickSnapshot([file('111.tsv', 9999)], '111', now).ref?.file).toBe('111.tsv')
+    expect(pickSnapshot([file('111.aaaaaaaa.tsv', 9999)], '111', now).ref?.file).toBe('111.aaaaaaaa.tsv')
+    expect(pickSnapshot([file('111.aaaaaaaa.tsv', 5), file('111.bbbbbbbb.tsv', 4)], '111', now, 'aaaaaaaa').ref?.file).toBe('111.aaaaaaaa.tsv')
+    expect(pickSnapshot([file('222.tsv', 1)], '111', now).ref).toBe(null)
+  })
+
+  test('the choice list names each place, session and state', async () => {
+    const ref = (name: string, age: number) => parseSnapshotName(file(name, age))!
+    const out = describeSnapshots(
+      [
+        { ref: ref('111.aaaaaaaa.tsv', 10), header: parseHeader('# studio-tree 2\tplace=111\tname=Cafe\tat=1\tcount=50') },
+        { ref: ref('222.bbbbbbbb.tsv', 9000), header: null },
+      ],
+      now,
+    )
+    expect(out).toContain('- Cafe (place 111, session aaaaaaaa): open, updated 10 s ago, 50 instances')
+    expect(out).toContain('- 222 (place 222, session bbbbbbbb): not heard from lately')
   })
 })

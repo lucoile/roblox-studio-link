@@ -22,7 +22,7 @@ DELTA = (
 )
 
 
-class ListenerTest(unittest.TestCase):
+class Base(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
         tree_listener.Handler.out_dir = self.dir.name
@@ -35,18 +35,30 @@ class ListenerTest(unittest.TestCase):
         self.server.server_close()
         self.dir.cleanup()
 
-    def post(self, body, place="1", gz=True):
-        data = gzip.compress(body.encode()) if gz else body.encode()
+    def request(self, method, path, body=None, headers=None):
         conn = http.client.HTTPConnection("127.0.0.1", self.port)
-        conn.request("POST", f"/tree?place={place}", data, {"X-Studio-Tree": "1"})
-        status = conn.getresponse().status
+        conn.request(method, path, body, {"X-Studio-Tree": "1"} if headers is None else headers)
+        response = conn.getresponse()
+        text = response.read().decode()
         conn.close()
-        return status
+        return response.status, text
 
-    def stored(self, place="1"):
-        with open(os.path.join(self.dir.name, f"{place}.tsv"), encoding="utf-8") as handle:
+    def post(self, body, place="1", gz=True, session=""):
+        data = gzip.compress(body.encode()) if gz else body.encode()
+        suffix = f"&session={session}" if session else ""
+        return self.request("POST", f"/tree?place={place}{suffix}", data)[0]
+
+    def stored(self, place="1", session=""):
+        name = f"{place}.{session}.tsv" if session else f"{place}.tsv"
+        with open(os.path.join(self.dir.name, name), encoding="utf-8") as handle:
             return handle.read()
 
+    def exists(self, place="1", session=""):
+        name = f"{place}.{session}.tsv" if session else f"{place}.tsv"
+        return os.path.exists(os.path.join(self.dir.name, name))
+
+
+class ListenerTest(Base):
     def test_full_snapshot_is_stored_as_sent(self):
         self.assertEqual(self.post(FULL), 204)
         self.assertEqual(self.stored(), FULL)
@@ -79,6 +91,56 @@ class ListenerTest(unittest.TestCase):
     def test_rejects_garbage(self):
         self.assertEqual(self.post("hello"), 400)
         self.assertEqual(self.post("# studio-tree 2\tplace=1\tmode=delta\n"), 400)
+
+
+class SessionTest(Base):
+    def test_health_names_the_protocol(self):
+        status, text = self.request("GET", "/health", None, {})
+        self.assertEqual((status, text), (200, f"studio-tree {tree_listener.PROTOCOL}"))
+
+    def test_sessions_of_one_place_keep_separate_files(self):
+        self.assertEqual(self.post(FULL, session="aaaaaaaa"), 204)
+        self.assertEqual(self.post(FULL.replace("ServerStorage.AB", "ServerStorage.ZZ"), session="bbbbbbbb"), 204)
+        self.assertIn("ServerStorage.AB", self.stored(session="aaaaaaaa"))
+        self.assertNotIn("ServerStorage.AB", self.stored(session="bbbbbbbb"))
+        self.assertFalse(self.exists())
+
+    def test_a_delta_patches_only_its_own_session(self):
+        self.post(FULL, session="aaaaaaaa")
+        self.post(FULL, session="bbbbbbbb")
+        self.assertEqual(self.post(DELTA, session="aaaaaaaa"), 204)
+        self.assertIn("ServerStorage.A.Y", self.stored(session="aaaaaaaa"))
+        self.assertNotIn("ServerStorage.A.Y", self.stored(session="bbbbbbbb"))
+        self.assertEqual(self.post(DELTA, session="cccccccc"), 409)
+
+    def test_a_bad_session_is_refused(self):
+        self.assertEqual(self.post(FULL, session="../x"), 400)
+
+    def test_ping_keeps_a_snapshot_alive_and_404s_when_it_is_gone(self):
+        path = "/ping?place=1&session=aaaaaaaa"
+        self.assertEqual(self.request("PUT", path)[0], 404)
+        self.post(FULL, session="aaaaaaaa")
+        file = os.path.join(self.dir.name, "1.aaaaaaaa.tsv")
+        os.utime(file, (1, 1))
+        self.assertEqual(self.request("PUT", path)[0], 204)
+        self.assertGreater(os.path.getmtime(file), 1000)
+        self.assertEqual(self.request("PUT", path, None, {})[0], 403)
+
+    def test_delete_removes_a_snapshot(self):
+        self.post(FULL, session="aaaaaaaa")
+        self.assertEqual(self.request("DELETE", "/tree?place=1&session=aaaaaaaa")[0], 204)
+        self.assertFalse(self.exists(session="aaaaaaaa"))
+        self.assertEqual(self.request("DELETE", "/tree?place=1&session=aaaaaaaa")[0], 204)
+
+    def test_prune_drops_silent_sessions_but_not_unsessioned_snapshots(self):
+        self.post(FULL, session="aaaaaaaa")
+        self.post(FULL)
+        old = os.path.join(self.dir.name, "1.aaaaaaaa.tsv")
+        os.utime(old, (1, 1))
+        os.utime(os.path.join(self.dir.name, "1.tsv"), (1, 1))
+        tree_listener.prune(self.dir.name)
+        self.assertFalse(self.exists(session="aaaaaaaa"))
+        self.assertTrue(self.exists())
 
 
 if __name__ == "__main__":

@@ -77,9 +77,11 @@ plugin and starts the listener, so after the first Studio restart there is nothi
   `/studio plugin`. Without `rojo` on PATH it says so and gives the command. The first send
   asks to allow HTTP to `127.0.0.1`; allow it. Restart Studio once after an update.
 - **Listener** (`plugin/listener/tree_listener.py`, needs `python3`): the mod starts it on
-  `127.0.0.1:34950` and writes `~/.claude/studio-tree/<placeId>.tsv`, patching it for deltas.
-  One runs per machine; other sessions use it, so restart any session still running an older
-  listener. Studio retries every 15 s while it is down, so a tree edited with Claude Code
+  `127.0.0.1:34950` and writes `~/.claude/studio-tree/<placeId>.<session>.tsv`, patching it for
+  deltas. One runs per machine, shared by every Claude Code session; the mod replaces an older
+  listener it finds on the port. Each Studio sends its own session id and a heartbeat every
+  30 s; a snapshot with no heartbeat for 15 minutes is deleted, and a Studio that closes cleanly
+  deletes its own. Studio retries every 15 s while it is down, so a tree edited with Claude Code
   closed arrives when it opens.
 - **`tree_search`** (tool): see below.
 
@@ -104,9 +106,21 @@ a write.
 | `group_by` | `class` or `parent`: counts instead of rows |
 | `details` | Show tags, attribute names, text and script lines on every row; otherwise only what a filter matched |
 | `limit` | Rows to return, 50 by default, 500 at most |
+| `studio_id`, `place_id`, `session` | Which snapshot, see below |
 
-The answer starts with the snapshot's age, and the tool defaults to the Studio Claude last
-targeted.
+The answer starts with the snapshot's age.
+
+#### Several Studios
+
+- **Different places** each have their own snapshot. `tree_search` reads the one for the Studio
+  Claude last targeted, or for `studio_id` (an id from `list_roblox_studios`) or `place_id`.
+- **Several Studios open and none targeted**: it does not guess. It lists each open snapshot with
+  its place, session, size and age, and asks for `studio_id`, `place_id` or `session`.
+- **The same place open in two Studios**: each keeps its own snapshot, so their edits never mix.
+  The most recently updated one answers, with a note naming both sessions; pass `session` to pick.
+  The snapshot can't tell which window is which, so `studio_id` alone doesn't separate them.
+- **Places never saved to Roblox** (place id 0) are keyed by their name, and two Studios get
+  separate snapshots even when the names match.
 
 ### Token savings
 

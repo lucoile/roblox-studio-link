@@ -376,3 +376,72 @@ export function formatResults(
   else for (const row of found.rows) lines.push(rowLine(row, found.show))
   return lines.join('\n')
 }
+
+// ---- Which snapshot file: one per place, and per Studio when a place is open in several ----
+
+export const LIVE_SECONDS = 120
+
+export type SnapshotFile = { name: string; mtimeMs: number }
+export type SnapshotRef = { file: string; place: string; session: string; mtimeMs: number }
+export type SnapshotPick = { ref: SnapshotRef | null; live: SnapshotRef[]; note: string }
+
+// <place>.tsv from a plugin that sent no session, <place>.<session>.tsv from one that did.
+const SNAPSHOT_NAME = /^([A-Za-z0-9_-]{1,80})(?:\.([a-f0-9]{6,16}))?\.tsv$/
+
+export function parseSnapshotName(file: SnapshotFile): SnapshotRef | null {
+  const found = SNAPSHOT_NAME.exec(file.name)
+  if (!found) return null
+  return { file: file.name, place: found[1]!, session: found[2] ?? '', mtimeMs: file.mtimeMs }
+}
+
+// The key the Studio plugin sends for a place: its id, or "local-<name>" for one never saved to Roblox.
+// The plugin replaces every byte outside [A-Za-z0-9_-] and keeps 60, so a multi-byte character counts once per byte.
+export function placeKeyOf(placeId: string | null, name: string): string {
+  if (placeId && placeId !== '0') return placeId
+  const bytes = (char: string) => {
+    const code = char.codePointAt(0)!
+    return code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4
+  }
+  let key = ''
+  for (const char of name) key += /[A-Za-z0-9_-]/.test(char) ? char : '_'.repeat(bytes(char))
+  return 'local-' + key.slice(0, 60)
+}
+
+export function snapshotRefs(files: SnapshotFile[]): SnapshotRef[] {
+  return files.flatMap(file => parseSnapshotName(file) ?? []).sort((a, b) => b.mtimeMs - a.mtimeMs)
+}
+
+export function isLive(ref: SnapshotRef, now: number): boolean {
+  return ref.session !== '' && now - ref.mtimeMs <= LIVE_SECONDS * 1000
+}
+
+// A Studio that still sends heartbeats is live. With several live for one place there is no telling which
+// the person means, so the most recently written wins and the answer says so.
+export function pickSnapshot(files: SnapshotFile[], place: string, now: number, session = ''): SnapshotPick {
+  const refs = snapshotRefs(files)
+  if (session) {
+    const ref = refs.find(candidate => candidate.session === session) ?? null
+    return { ref, live: ref ? [ref] : [], note: '' }
+  }
+  const mine = refs.filter(candidate => candidate.place === place)
+  const live = mine.filter(candidate => isLive(candidate, now))
+  const ref = live[0] ?? mine[0] ?? null
+  const note =
+    ref && live.length > 1
+      ? `${live.length} Studios have this place open (sessions ${live.map(candidate => candidate.session).join(', ')}); showing session ${ref.session}, the most recently updated. Pass session to choose.`
+      : ''
+  return { ref, live, note }
+}
+
+// One line per snapshot, for an answer that asks the caller to choose.
+export function describeSnapshots(entries: { ref: SnapshotRef; header: TreeHeader | null }[], now: number): string {
+  return entries
+    .map(({ ref, header }) => {
+      const name = header?.name || ref.place
+      const size = header?.count ? `, ${header.count} instances` : ''
+      const state = isLive(ref, now) ? 'open' : 'not heard from lately'
+      const session = ref.session ? `, session ${ref.session}` : ''
+      return `- ${name} (place ${ref.place}${session}): ${state}, updated ${formatAge(now - ref.mtimeMs)} ago${size}`
+    })
+    .join('\n')
+}
