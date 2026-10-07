@@ -20,6 +20,7 @@ import { GREP_CAP, TREE_PORT, formatResults, grepArgs, makeQuery, parseHeader, s
 const PLUGIN = 'roblox-studio-link'
 const PANE = 'roblox-studio-link'
 const PROJECT_FILE = 'default.project.json'
+const STUDIO_PLUGIN_FILE = 'StudioTree.rbxm'
 
 const studios = atom({ plugin: 'roblox-studio-link', key: 'studios' } as const, [])
 const lastStudio = atom({ plugin: 'roblox-studio-link', key: 'lastStudio' } as const, '')
@@ -537,6 +538,38 @@ async function treeSearch($: $, args: Record<string, unknown>): Promise<{ text: 
   return { isError: false, text: formatResults(parseHeader(head.stdout.trim()), place, result, isCapped, await $.clock.now()) }
 }
 
+function hashText(text: string): string {
+  let hash = 0x811c9dc5
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i)
+    hash = Math.imul(hash, 0x01000193) >>> 0
+  }
+  return hash.toString(16)
+}
+
+// rojo's --plugin writes to Studio's local plugins folder; rebuilt only when the source changes.
+async function installStudioPlugin($: $, isForced: boolean): Promise<string> {
+  const project = `${$.plugin.root}/studio-plugin/plugin.project.json`
+  const source = await $.fs.read(`${$.plugin.root}/studio-plugin/StudioTree.server.luau`)
+  const hash = hashText(source)
+  const home = await $.env.get('HOME')
+  const macFile = home ? `${home}/Documents/Roblox/Plugins/${STUDIO_PLUGIN_FILE}` : ''
+  const isMissing = macFile ? !(await $.fs.exists(macFile)) : false
+  if (!isForced && !isMissing && (await $.store.get('studioPluginHash')) === hash) return ''
+  const manual = `rojo build "${project}" --plugin ${STUDIO_PLUGIN_FILE}`
+  let done: Awaited<ReturnType<typeof $.process.run>>
+  try {
+    done = await $.process.run(['rojo', 'build', project, '--plugin', STUDIO_PLUGIN_FILE], { timeoutMs: 30000 })
+  } catch {
+    return `Could not install the Studio Tree plugin: rojo is not on PATH. Run: ${manual}`
+  }
+  if (done.exitCode !== 0) {
+    return `Could not install the Studio Tree plugin (${(done.stderr || done.stdout).trim().split('\n').pop()}). Run: ${manual}`
+  }
+  await $.store.set('studioPluginHash', hash)
+  return 'Installed the Studio Tree plugin. Studio loads it on its next start if it has not already.'
+}
+
 async function openPane($: $): Promise<void> {
   await $.ui.open({ id: PANE, title: 'Studio', focus: true })
   void refreshAll($)
@@ -548,7 +581,7 @@ export const register: Register = on => {
     await $.command.register({
       name: 'studio',
       description: 'Studio targets, Rojo sync, place edits and bridges',
-      argumentHint: '[serve [port] | stop [pid] | drift | saved | refresh | band]',
+      argumentHint: '[serve [port] | stop [pid] | drift | saved | refresh | plugin | band]',
     })
     await $.tool.register({
       name: 'bridge_command',
@@ -583,6 +616,9 @@ export const register: Register = on => {
     })
     void refreshAll($)
     void ensureTreeListener($)
+    void installStudioPlugin($, false)
+      .then(note => note && $.ui.toast(note, { timeoutMs: 8000 }))
+      .catch(error => $.ui.log(`Studio Tree plugin install: ${String(error)}`, { to: 'debug' }))
     $.clock.every(20000, () => {
       void refreshAll($)
       void ensureTreeListener($)
@@ -618,6 +654,7 @@ export const register: Register = on => {
       await refreshAll($)
       return { text: 'Refreshed Studio, Rojo and bridges.' }
     }
+    if (verb === 'plugin') return { text: await installStudioPlugin($, true) }
     if (verb === 'band') {
       const hidden = !(await read($, isBandHidden))
       await update($, isBandHidden, () => hidden)

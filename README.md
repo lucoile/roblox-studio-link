@@ -28,6 +28,7 @@ No setup for the pane: everything is read from the Studio MCP server, `ps`, `lso
 | `/studio drift` | Compares the Source of your changed scripts with the Studio copy |
 | `/studio saved` | Marks every Studio edit as saved |
 | `/studio refresh` | Rechecks everything now |
+| `/studio plugin` | Rebuilds and installs the Studio Tree plugin |
 | `/studio band` | Hides or shows the band above the prompt |
 
 ## What it shows
@@ -62,17 +63,13 @@ A Studio plugin keeps a snapshot of each open place's instance tree on disk, and
 where walking a large place through `search_game_tree` takes several calls of up to ~10k
 tokens each.
 
-- **Studio Tree plugin** (`studio-plugin/`): sends the tree from edit mode when the place
-  loads, and again 3 s after adds, removes or a recorded edit (renames, moves) stop. It
+- **Studio Tree plugin** (`plugin/studio-plugin/`): sends the tree from edit mode when the
+  place loads, and again 3 s after adds, removes or a recorded edit (renames, moves) stop. It
   yields while it walks, so a 37k-instance place doesn't hitch Studio. The **Send tree**
-  toolbar button sends it now. Build and install it once per machine:
-
-  ```
-  rojo build studio-plugin/plugin.project.json --plugin StudioTree.rbxm
-  ```
-
-  Or paste `StudioTree.server.luau` into a Script and use *Save as Local Plugin*. The first
-  send asks to allow HTTP to `127.0.0.1`; allow it.
+  toolbar button sends it now. The mod installs it at session start with
+  `rojo build --plugin StudioTree.rbxm`, again whenever its source changes, and on
+  `/studio plugin`. Without `rojo` on PATH it says so and gives the command. The first send
+  asks to allow HTTP to `127.0.0.1`; allow it.
 - **Listener** (`plugin/listener/tree_listener.py`, needs `python3`): the mod starts it on
   `127.0.0.1:34950` and writes `~/.claude/studio-tree/<placeId>.tsv`. One runs per machine;
   other sessions use it. Studio retries every 15 s while it is down, so a tree edited with
