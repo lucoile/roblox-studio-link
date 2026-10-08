@@ -594,7 +594,7 @@ async function noSnapshot($: $, dir: string, what: string): Promise<string> {
     listening
       ? 'The listener is running; the Studio Tree plugin in that Studio has not sent a tree yet (installed? HTTP allowed for 127.0.0.1?).'
       : `The listener is not running${treeNote ? `: ${treeNote}` : '.'}`,
-    'Use search_game_tree with path and max_depth meanwhile.',
+    'Use search_game_tree with path and max_depth 10 meanwhile; its default depth of 3 hides nested matches.',
   ].join(' ')
 }
 
@@ -686,7 +686,7 @@ export const register: Register = on => {
     await $.tool.register({
       name: 'tree_search',
       description:
-        "Searches a snapshot of a Studio place's instance tree that the Studio Tree plugin keeps on disk, so lookups cost a few hundred tokens and no Studio round trip. Use it before search_game_tree to find where something is. query matches instance names case-insensitively, camelCase aware (\"hotbar slot\" finds HotbarSlot), any of several words by default, best match first; match picks any, all, exact, prefix or regex. under limits to a path and its descendants; with under and no filter it lists children (depth 1, raise depth for more). class_name takes class names or families (BaseScript, LuaSourceContainer, GuiObject, BasePart, ValueBase, UIComponent...), comma separated. tag, attribute and text filter on CollectionService tags, attribute names and the Text of text GUI objects. Numbered siblings (Slot_floor_1..200) collapse into one line, and matches below a match fold into it; fold false lists everything. group_by class or parent returns counts instead of rows. Rows are path, ClassName and child count; tag, attribute and text filters add what they matched, details adds tags, attribute names, text and script line counts to every row. The first line says how old the snapshot is: edits reach it within seconds, but confirm with inspect_instance before writing.",
+        "Searches a snapshot of a Studio place's instance tree that the Studio Tree plugin keeps on disk, so lookups cost a few hundred tokens and no Studio round trip. Use it before search_game_tree to find where something is. query matches instance names case-insensitively, camelCase aware (\"hotbar slot\" finds HotbarSlot), any of several words by default, best match first; match picks any, all, exact, prefix or regex. under limits to a path and its descendants; with under and no filter it lists children (depth 1, raise depth for more). class_name takes class names or families (BaseScript, LuaSourceContainer, GuiObject, BasePart, ValueBase, UIComponent...), comma separated. tag, attribute and text filter on CollectionService tags, attribute names and the Text of text GUI objects. Numbered siblings (Slot_floor_1..200) collapse into one line, and matches below a match fold into it; fold false lists everything. group_by class or parent returns counts instead of rows. Rows are path, ClassName and child count; tag, attribute and text filters add what they matched, details adds tags, attribute names, text and script line counts to every row. The first line says how old the snapshot is: edits reach it within seconds, but confirm with inspect_instance before writing. The snapshot is the edit-mode place only; search Players, PlayerGui and play-mode clones with search_game_tree and datamodel_type Client or Server.",
       inputSchema: {
         type: 'object',
         properties: {
