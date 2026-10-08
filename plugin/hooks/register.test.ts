@@ -2,7 +2,7 @@ import { describe, expect, test } from 'claude-code/testing'
 
 import { instanceFor, isHarnessSource, projectMappings, rojoServeLines } from './rojo'
 import { computeLights } from './status'
-import { isWriteCall, luauWrites, parseStudios, toolAnswer } from './studio'
+import { isWriteCall, luauWrites, parseStudios, shouldClearStudios, toolAnswer } from './studio'
 
 const ONE_STUDIO = JSON.stringify({ studios: [{ id: 'a-1', name: 'My Game (placeId: 111)' }] })
 
@@ -106,6 +106,15 @@ describe('answering as a registered tool', () => {
   test('a string result, or a deny for an error, never a content object', async () => {
     expect(toolAnswer('rows')).toEqual({ result: 'rows' })
     expect(toolAnswer('no snapshot', true)).toEqual({ deny: 'no snapshot' })
+  })
+})
+
+describe('keeping the Studio list', () => {
+  const minute = 60 * 1000
+  test('failed listings alone never clear it; only many failures after a long silence do', async () => {
+    expect(shouldClearStudios(1, 0, 100 * minute)).toBe(false)
+    expect(shouldClearStudios(40, 100 * minute, 101 * minute)).toBe(false)
+    expect(shouldClearStudios(40, 0, 100 * minute)).toBe(true)
   })
 })
 

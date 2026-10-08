@@ -91,3 +91,12 @@ export function placeName(studio: StudioTarget): string {
 export function toolAnswer(text: string, isError = false): { result: string } | { deny: string } {
   return isError ? { deny: text } : { result: text }
 }
+
+export const LIST_FAILURES_BEFORE_CLEAR = 3
+export const LIST_STALE_MS = 30 * 60 * 1000
+
+// Some permission modes refuse the mod's own MCP calls, so a failed listing says nothing about the Studios.
+// The cache keeps what the last successful listing said (the mod's or the model's own) until it is old.
+export function shouldClearStudios(failures: number, lastListedAt: number, now: number): boolean {
+  return failures >= LIST_FAILURES_BEFORE_CLEAR && now - lastListedAt >= LIST_STALE_MS
+}

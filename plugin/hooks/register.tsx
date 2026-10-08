@@ -12,7 +12,7 @@ import {
   rojoServeLines,
   sourceLengthsLuau,
 } from './rojo'
-import { STUDIO_TOOL, isWriteCall, parseMode, parseStudios, persistsToPlace, placeName, shortTool, summarize, toolAnswer } from './studio'
+import { STUDIO_TOOL, isWriteCall, parseMode, parseStudios, persistsToPlace, placeName, shortTool, shouldClearStudios, summarize, toolAnswer } from './studio'
 import { LEVEL_COLOR, LEVEL_RANK, baseName, computeLights, currentStudio } from './status'
 import type { Light } from './status'
 import { GREP_CAP, TREE_PORT, describeSnapshots, formatResults, grepArgs, isLive, makeQuery, parseHeader, pickSnapshot, placeKeyOf, search, snapshotRefs } from './tree'
@@ -21,7 +21,6 @@ const PLUGIN = 'roblox-studio-link'
 const PANE = 'roblox-studio-link'
 const PROJECT_FILE = 'default.project.json'
 const STUDIO_PLUGIN_FILE = 'StudioTree.rbxm'
-const LIST_FAILURES_BEFORE_CLEAR = 3
 const LISTENER_PROTOCOL = 2
 
 const studios = atom({ plugin: 'roblox-studio-link', key: 'studios' } as const, [])
@@ -49,6 +48,8 @@ let treeListener: { stop: () => void } | null = null
 let treeNote = ''
 let isTreeStarting = false
 let listFailures = 0
+let lastListedAt = 0
+let lastListError = ''
 
 async function run($: $, argv: string[], cwd?: string) {
   try {
@@ -119,12 +120,13 @@ async function refreshStudios($: $) {
   try {
     list = parseStudios(await mcpText($, 'list_roblox_studios', {}))
     listFailures = 0
+    lastListError = ''
+    lastListedAt = Date.now()
   } catch (error) {
-    // One failed listing must not wipe the cache the write guard reads; a Studio that really
-    // went away fails every time, so clear only after several in a row.
     listFailures++
-    $.ui.log(`list_roblox_studios failed (${listFailures}): ${String(error)}`, { to: 'debug' })
-    if (listFailures < LIST_FAILURES_BEFORE_CLEAR) return
+    lastListError = String(error).replace(/\s+/g, ' ').slice(0, 200)
+    $.ui.log(`list_roblox_studios failed (${listFailures}): ${lastListError}`, { to: 'debug' })
+    if (!shouldClearStudios(listFailures, lastListedAt, Date.now())) return
     list = []
   }
   for (const studio of list) {
@@ -395,10 +397,14 @@ async function resolveStudio($: $, id: unknown) {
   return studio ?? null
 }
 
+function listHint(): string {
+  return lastListError ? ` The mod could not list the Studios itself (${lastListError.slice(0, 110)}); call list_roblox_studios once, then retry.` : ' List the open Studios and check the target before writing.'
+}
+
 // With one Studio open a write can only land there. With several, the first write to each asks.
 async function guard($: $, studio: StudioTarget | null, studioId: string): Promise<string | null> {
   if (!studio) {
-    return `roblox-studio-link: Studio ${studioId || '(none given)'} isn't in list_roblox_studios. List the open Studios and check the target before writing.`
+    return `roblox-studio-link: Studio ${studioId || '(none given)'} isn't in list_roblox_studios.${listHint()}`
   }
   const open = await read($, studios)
   if (open.length < 2 || (await read($, approved)).includes(studio.id)) return null
@@ -548,7 +554,7 @@ async function resolveTree($: $, args: Record<string, unknown>): Promise<TreeTar
   if (!session && !place) {
     const studio = await resolveStudio($, studioId)
     if (studio) place = placeKeyOf(studio.placeId, placeName(studio))
-    else if (studioId) return { error: `Studio ${studioId} is not in list_roblox_studios. List the open Studios and pass one of their ids.` }
+    else if (studioId) return { error: `Studio ${studioId} is not in list_roblox_studios.${listHint()}` }
   }
   if (!session && !place) {
     const open = await read($, studios)
@@ -575,9 +581,9 @@ async function resolveTree($: $, args: Record<string, unknown>): Promise<TreeTar
 }
 
 async function describeEntries($: $, dir: string, refs: ReturnType<typeof snapshotRefs>) {
-  const heads = await $.process.run(['head', '-q', '-n', '1', ...refs.map(ref => `${dir}/${ref.file}`)], { timeoutMs: 5000 })
-  const lines = heads.stdout.split('\n')
-  return refs.map((ref, index) => ({ ref, header: parseHeader(lines[index] ?? '') }))
+  // BSD head (macOS) has no -q, so read each file's first line on its own.
+  const heads = await Promise.all(refs.map(ref => $.process.run(['head', '-n', '1', `${dir}/${ref.file}`], { timeoutMs: 5000 })))
+  return refs.map((ref, index) => ({ ref, header: parseHeader(heads[index]?.stdout.trim() ?? '') }))
 }
 
 async function noSnapshot($: $, dir: string, what: string): Promise<string> {
@@ -763,6 +769,8 @@ export const register: Register = on => {
         const known = await read($, studios)
         if (list.length) {
           await update($, studios, () => list.map(s => ({ ...s, mode: known.find(k => k.id === s.id)?.mode ?? null })))
+          listFailures = 0
+          lastListedAt = Date.now()
         }
       }
       return ran

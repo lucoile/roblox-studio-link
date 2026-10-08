@@ -58,8 +58,11 @@ The band above the prompt appears only when a light is yellow or red.
   returning `Result`. Needs play mode.
 - `tree_search` (tool) searches a snapshot of the place's instance tree kept on disk: ranked
   name matches, class families, tags, attributes, text and counts. See [Tree search](#tree-search).
-- A failed listing of the open Studios keeps the last known list and only clears it after
-  three failures in a row, so one hiccup does not make the guard refuse an open Studio.
+- The mod learns which Studios are open from `list_roblox_studios`, its own call or yours. Some
+  permission modes (auto mode among them) refuse the mod's own MCP calls, so a listing that fails
+  clears nothing: the last known list stays for 30 minutes and is replaced by the next listing,
+  yours included. When a Studio is not in the list the error says so and to call
+  `list_roblox_studios` once.
 
 The `execute_luau` write check is a pattern match on the code, so it errs towards asking.
 
