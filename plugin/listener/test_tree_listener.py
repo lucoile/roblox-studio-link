@@ -94,9 +94,9 @@ class ListenerTest(Base):
 
 
 class SessionTest(Base):
-    def test_health_names_the_protocol(self):
-        status, text = self.request("GET", "/health", None, {})
-        self.assertEqual((status, text), (200, f"studio-tree {tree_listener.PROTOCOL}"))
+    def test_health_is_unchanged_and_version_names_the_protocol(self):
+        self.assertEqual(self.request("GET", "/health", None, {}), (200, "studio-tree"))
+        self.assertEqual(self.request("GET", "/version", None, {}), (200, str(tree_listener.PROTOCOL)))
 
     def test_sessions_of_one_place_keep_separate_files(self):
         self.assertEqual(self.post(FULL, session="aaaaaaaa"), 204)
@@ -132,15 +132,16 @@ class SessionTest(Base):
         self.assertFalse(self.exists(session="aaaaaaaa"))
         self.assertEqual(self.request("DELETE", "/tree?place=1&session=aaaaaaaa")[0], 204)
 
-    def test_prune_drops_silent_sessions_but_not_unsessioned_snapshots(self):
+    def test_prune_drops_silent_sessions_and_snapshots_a_session_superseded(self):
         self.post(FULL, session="aaaaaaaa")
         self.post(FULL)
-        old = os.path.join(self.dir.name, "1.aaaaaaaa.tsv")
-        os.utime(old, (1, 1))
-        os.utime(os.path.join(self.dir.name, "1.tsv"), (1, 1))
+        self.post(FULL, place="2")
+        for name in ("1.aaaaaaaa.tsv", "1.tsv", "2.tsv"):
+            os.utime(os.path.join(self.dir.name, name), (1, 1))
         tree_listener.prune(self.dir.name)
         self.assertFalse(self.exists(session="aaaaaaaa"))
-        self.assertTrue(self.exists())
+        self.assertFalse(self.exists())  # place 1 had a session file, so its unsessioned one is dead
+        self.assertTrue(self.exists("2"))  # place 2 only has an unsessioned plugin: kept
 
 
 if __name__ == "__main__":

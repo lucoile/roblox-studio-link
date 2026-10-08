@@ -457,13 +457,13 @@ async function treeDir($: $): Promise<string> {
   return `${(await $.env.get('HOME')) ?? '.'}/.claude/studio-tree`
 }
 
-// 0 when nothing answers, 1 for the first listener ("studio-tree"), else the number it reports.
+// 0 when nothing answers, 1 for a listener with no /version, else the protocol it reports.
 async function treeListenerVersion($: $): Promise<number> {
   try {
-    const answer = await $.http.fetch(`http://127.0.0.1:${TREE_PORT}/health`)
-    const text = answer.text.trim()
-    if (!answer.ok || !text.startsWith('studio-tree')) return 0
-    return Number(/^studio-tree\s+(\d+)$/.exec(text)?.[1] ?? 1)
+    const health = await $.http.fetch(`http://127.0.0.1:${TREE_PORT}/health`)
+    if (!health.ok || health.text.trim() !== 'studio-tree') return 0
+    const version = await $.http.fetch(`http://127.0.0.1:${TREE_PORT}/version`)
+    return version.ok ? Number(version.text.trim()) || 1 : 1
   } catch {
     return 0
   }

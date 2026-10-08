@@ -72,12 +72,15 @@ def prune(out_dir, now=None):
         names = os.listdir(out_dir)
     except OSError:
         return
+    sessioned = {name.split(".", 1)[0] for name in names if re.search(r"\.[a-f0-9]{6,16}\.tsv$", name)}
     for name in names:
         full = os.path.join(out_dir, name)
         is_session = re.search(r"\.[a-f0-9]{6,16}\.tsv$", name) is not None
         is_temp = name.startswith(".") and name.endswith(".tmp")
+        # <place>.tsv is from a plugin with no sessions; once a session file exists for the place it is dead weight.
+        is_superseded = name.endswith(".tsv") and not is_session and name[: -len(".tsv")] in sessioned
         try:
-            if (is_session or is_temp) and now - os.path.getmtime(full) > PRUNE_AFTER:
+            if (is_session or is_temp or is_superseded) and now - os.path.getmtime(full) > PRUNE_AFTER:
                 os.remove(full)
         except OSError:
             pass
@@ -102,9 +105,12 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self):
-        if urlparse(self.path).path == "/health":
-            # "studio-tree" alone is how version 1 answered; the number says which protocol this is.
-            self.answer(200, f"studio-tree {PROTOCOL}")
+        path = urlparse(self.path).path
+        if path == "/health":
+            # Unchanged since version 1, so an older mod still finds this listener.
+            self.answer(200, "studio-tree")
+        elif path == "/version":
+            self.answer(200, str(PROTOCOL))
         else:
             self.answer(404)
 
