@@ -7,11 +7,16 @@ import re
 import sys
 import tempfile
 import threading
+import time
 import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 PLACE = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
+SESSION = re.compile(r"^[a-f0-9]{6,16}$")
+PROTOCOL = 2
+PRUNE_AFTER = 15 * 60
+PRUNE_EVERY = 60
 HEADER = re.compile(rb"^# studio-tree (\d+)\t")
 ROOT_SEPARATOR = "\x1f"
 MAX_BODY = 64 * 1024 * 1024
@@ -55,6 +60,38 @@ def merge(old_text, delta_text, roots):
     return "\n".join(["\t".join(head)] + kept + added) + "\n"
 
 
+def snapshot_path(out_dir, place, session):
+    # Each Studio sends its own session id, so two Studios on one place keep separate files.
+    return os.path.join(out_dir, f"{place}.{session}.tsv" if session else f"{place}.tsv")
+
+
+def prune(out_dir, now=None):
+    """Removes snapshots of Studios that stopped sending heartbeats, and leftover temp files."""
+    now = time.time() if now is None else now
+    try:
+        names = os.listdir(out_dir)
+    except OSError:
+        return
+    sessioned = {name.split(".", 1)[0] for name in names if re.search(r"\.[a-f0-9]{6,16}\.tsv$", name)}
+    for name in names:
+        full = os.path.join(out_dir, name)
+        is_session = re.search(r"\.[a-f0-9]{6,16}\.tsv$", name) is not None
+        is_temp = name.startswith(".") and name.endswith(".tmp")
+        # <place>.tsv is from a plugin with no sessions; once a session file exists for the place it is dead weight.
+        is_superseded = name.endswith(".tsv") and not is_session and name[: -len(".tsv")] in sessioned
+        try:
+            if (is_session or is_temp or is_superseded) and now - os.path.getmtime(full) > PRUNE_AFTER:
+                os.remove(full)
+        except OSError:
+            pass
+
+
+def prune_forever(out_dir):
+    while True:
+        time.sleep(PRUNE_EVERY)
+        prune(out_dir)
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "studio-tree"
     out_dir = "."
@@ -68,20 +105,67 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self):
-        if urlparse(self.path).path == "/health":
+        path = urlparse(self.path).path
+        if path == "/health":
+            # Unchanged since version 1, so an older mod still finds this listener.
             self.answer(200, "studio-tree")
+        elif path == "/version":
+            self.answer(200, str(PROTOCOL))
         else:
             self.answer(404)
 
-    def do_POST(self):
+    def target(self):
         url = urlparse(self.path)
-        place = parse_qs(url.query).get("place", [""])[0]
-        if url.path != "/tree" or not PLACE.match(place):
-            return self.answer(400, "bad path or place")
+        query = parse_qs(url.query)
+        place = query.get("place", [""])[0]
+        session = query.get("session", [""])[0]
+        if not PLACE.match(place) or (session and not SESSION.match(session)):
+            return url, None
+        return url, snapshot_path(self.out_dir, place, session)
+
+    def check_origin(self):
         # A custom header forces a CORS preflight, which this server never answers,
         # so a web page can't post a fake tree.
         if self.headers.get("X-Studio-Tree") != "1":
-            return self.answer(403, "missing X-Studio-Tree header")
+            self.answer(403, "missing X-Studio-Tree header")
+            return False
+        return True
+
+    def do_PUT(self):
+        # A heartbeat: keeps a Studio's snapshot alive, and says 404 when the file is gone so Studio resends.
+        url, target = self.target()
+        if url.path != "/ping" or target is None:
+            return self.answer(400, "bad path or place")
+        if not self.check_origin():
+            return
+        with STORE:
+            if not os.path.exists(target):
+                return self.answer(404, "no snapshot")
+            try:
+                os.utime(target)
+            except OSError:
+                return self.answer(404, "no snapshot")
+        self.answer(204)
+
+    def do_DELETE(self):
+        url, target = self.target()
+        if url.path != "/tree" or target is None:
+            return self.answer(400, "bad path or place")
+        if not self.check_origin():
+            return
+        with STORE:
+            try:
+                os.remove(target)
+            except OSError:
+                pass
+        self.answer(204)
+
+    def do_POST(self):
+        url, target = self.target()
+        if url.path != "/tree" or target is None:
+            return self.answer(400, "bad path or place")
+        if not self.check_origin():
+            return
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
@@ -96,7 +180,6 @@ class Handler(BaseHTTPRequestHandler):
         if not start:
             return self.answer(400, "not a studio-tree snapshot")
         os.makedirs(self.out_dir, exist_ok=True)
-        target = os.path.join(self.out_dir, f"{place}.tsv")
         # Studio strings are UTF-8, but one cut-off character must not cost the whole snapshot.
         text = tree.decode("utf-8", errors="replace")
         tree = text.encode()
@@ -116,7 +199,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not old_start or old_start.group(1) != start.group(1):
                     return self.answer(409, "no snapshot to patch")
                 tree = merge(old_text, text, roots).encode()
-            handle, temp = tempfile.mkstemp(dir=self.out_dir, prefix=f".{place}.", suffix=".tmp")
+            handle, temp = tempfile.mkstemp(dir=self.out_dir, prefix=".snapshot.", suffix=".tmp")
             with os.fdopen(handle, "wb") as out:
                 out.write(tree)
             os.replace(temp, target)
@@ -137,6 +220,7 @@ def main():
     except OSError as error:
         print(f"studio-tree: port {options.port} unavailable: {error}", file=sys.stderr, flush=True)
         sys.exit(2)
+    threading.Thread(target=prune_forever, args=(options.dir,), daemon=True).start()
     print(f"studio-tree: listening on 127.0.0.1:{options.port}, writing {options.dir}", flush=True)
     server.serve_forever()
 

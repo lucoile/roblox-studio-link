@@ -12,16 +12,16 @@ import {
   rojoServeLines,
   sourceLengthsLuau,
 } from './rojo'
-import { STUDIO_TOOL, isWriteCall, parseMode, parseStudios, persistsToPlace, placeName, shortTool, summarize, toolAnswer } from './studio'
+import { STUDIO_TOOL, isWriteCall, parseMode, parseStudios, persistsToPlace, placeName, shortTool, shouldClearStudios, summarize, toolAnswer } from './studio'
 import { LEVEL_COLOR, LEVEL_RANK, baseName, computeLights, currentStudio } from './status'
 import type { Light } from './status'
-import { GREP_CAP, TREE_PORT, formatResults, grepArgs, makeQuery, parseHeader, search } from './tree'
+import { GREP_CAP, TREE_PORT, describeSnapshots, formatResults, grepArgs, isLive, makeQuery, parseHeader, pickSnapshot, placeKeyOf, search, snapshotRefs } from './tree'
 
 const PLUGIN = 'roblox-studio-link'
 const PANE = 'roblox-studio-link'
 const PROJECT_FILE = 'default.project.json'
 const STUDIO_PLUGIN_FILE = 'StudioTree.rbxm'
-const LIST_FAILURES_BEFORE_CLEAR = 3
+const LISTENER_PROTOCOL = 2
 
 const studios = atom({ plugin: 'roblox-studio-link', key: 'studios' } as const, [])
 const lastStudio = atom({ plugin: 'roblox-studio-link', key: 'lastStudio' } as const, '')
@@ -48,6 +48,8 @@ let treeListener: { stop: () => void } | null = null
 let treeNote = ''
 let isTreeStarting = false
 let listFailures = 0
+let lastListedAt = 0
+let lastListError = ''
 
 async function run($: $, argv: string[], cwd?: string) {
   try {
@@ -118,12 +120,13 @@ async function refreshStudios($: $) {
   try {
     list = parseStudios(await mcpText($, 'list_roblox_studios', {}))
     listFailures = 0
+    lastListError = ''
+    lastListedAt = Date.now()
   } catch (error) {
-    // One failed listing must not wipe the cache the write guard reads; a Studio that really
-    // went away fails every time, so clear only after several in a row.
     listFailures++
-    $.ui.log(`list_roblox_studios failed (${listFailures}): ${String(error)}`, { to: 'debug' })
-    if (listFailures < LIST_FAILURES_BEFORE_CLEAR) return
+    lastListError = String(error).replace(/\s+/g, ' ').slice(0, 200)
+    $.ui.log(`list_roblox_studios failed (${listFailures}): ${lastListError}`, { to: 'debug' })
+    if (!shouldClearStudios(listFailures, lastListedAt, Date.now())) return
     list = []
   }
   for (const studio of list) {
@@ -394,10 +397,14 @@ async function resolveStudio($: $, id: unknown) {
   return studio ?? null
 }
 
+function listHint(): string {
+  return lastListError ? ` The mod could not list the Studios itself (${lastListError.slice(0, 110)}); call list_roblox_studios once, then retry.` : ' List the open Studios and check the target before writing.'
+}
+
 // With one Studio open a write can only land there. With several, the first write to each asks.
 async function guard($: $, studio: StudioTarget | null, studioId: string): Promise<string | null> {
   if (!studio) {
-    return `roblox-studio-link: Studio ${studioId || '(none given)'} isn't in list_roblox_studios. List the open Studios and check the target before writing.`
+    return `roblox-studio-link: Studio ${studioId || '(none given)'} isn't in list_roblox_studios.${listHint()}`
   }
   const open = await read($, studios)
   if (open.length < 2 || (await read($, approved)).includes(studio.id)) return null
@@ -456,13 +463,34 @@ async function treeDir($: $): Promise<string> {
   return `${(await $.env.get('HOME')) ?? '.'}/.claude/studio-tree`
 }
 
-async function isTreeListening($: $): Promise<boolean> {
+// 0 when nothing answers, 1 for a listener with no /version, else the protocol it reports.
+async function treeListenerVersion($: $): Promise<number> {
   try {
-    const answer = await $.http.fetch(`http://127.0.0.1:${TREE_PORT}/health`)
-    return answer.ok && answer.text.trim() === 'studio-tree'
+    const health = await $.http.fetch(`http://127.0.0.1:${TREE_PORT}/health`)
+    if (!health.ok || health.text.trim() !== 'studio-tree') return 0
+    const version = await $.http.fetch(`http://127.0.0.1:${TREE_PORT}/version`)
+    return version.ok ? Number(version.text.trim()) || 1 : 1
   } catch {
-    return false
+    return 0
   }
+}
+
+async function isTreeListening($: $): Promise<boolean> {
+  return (await treeListenerVersion($)) > 0
+}
+
+// An older listener left running by an earlier session would ignore sessions and heartbeats. It is ours when
+// its command line names tree_listener.py; anything else on the port is left alone.
+async function stopOldListener($: $): Promise<boolean> {
+  const pids = (await run($, ['lsof', '-ti', `tcp:${TREE_PORT}`, '-sTCP:LISTEN'])).split('\n').filter(Boolean)
+  let isStopped = false
+  for (const pid of pids) {
+    if (!/tree_listener\.py/.test(await run($, ['ps', '-p', pid, '-o', 'command=']))) continue
+    await run($, ['kill', pid])
+    isStopped = true
+  }
+  if (isStopped) await new Promise<void>(resolve => $.clock.after(700, resolve))
+  return isStopped
 }
 
 // One listener per machine: when another session already runs it, this one leaves it be.
@@ -470,7 +498,12 @@ async function ensureTreeListener($: $): Promise<void> {
   if (treeListener || isTreeStarting) return
   isTreeStarting = true
   try {
-    if (!(await isTreeListening($))) await startTreeListener($)
+    const version = await treeListenerVersion($)
+    if (version === 0) await startTreeListener($)
+    else if (version < LISTENER_PROTOCOL) {
+      if (await stopOldListener($)) await startTreeListener($)
+      else treeNote = `A tree listener on port ${TREE_PORT} is older than this mod and could not be replaced; stop it and reopen Claude Code.`
+    }
   } finally {
     isTreeStarting = false
   }
@@ -502,38 +535,74 @@ async function startTreeListener($: $): Promise<void> {
   })()
 }
 
-async function treePlace($: $, wanted: unknown): Promise<string> {
-  if (typeof wanted === 'string' && wanted.trim()) return wanted.trim()
-  const studio = await resolveStudio($, '')
-  if (studio?.placeId && studio.placeId !== '0') return studio.placeId
+type TreeTarget = { file: string; place: string; note: string }
+
+// Which snapshot a search reads: the one named by session, else the place of the Studio named by studio_id or
+// place_id, else the Studio Claude last targeted. With several Studios open and none picked there is no safe guess.
+async function resolveTree($: $, args: Record<string, unknown>): Promise<TreeTarget | { error: string }> {
+  const dir = await treeDir($)
+  let listed: { name: string; mtimeMs: number }[] = []
   try {
-    const files = (await $.fs.list(await treeDir($))).filter(entry => entry.name.endsWith('.tsv'))
-    const newest = [...files].sort((a, b) => b.mtimeMs - a.mtimeMs)[0]
-    return newest ? newest.name.slice(0, -'.tsv'.length) : ''
-  } catch {
-    return ''
+    listed = (await $.fs.list(dir)).filter(entry => entry.name.endsWith('.tsv'))
+  } catch {}
+  const now = await $.clock.now()
+  const session = typeof args.session === 'string' ? args.session.trim() : ''
+  const wantedPlace = typeof args.place_id === 'string' ? args.place_id.trim() : ''
+  const studioId = typeof args.studio_id === 'string' ? args.studio_id.trim() : ''
+
+  let place = wantedPlace
+  if (!session && !place) {
+    const studio = await resolveStudio($, studioId)
+    if (studio) place = placeKeyOf(studio.placeId, placeName(studio))
+    else if (studioId) return { error: `Studio ${studioId} is not in list_roblox_studios.${listHint()}` }
   }
+  if (!session && !place) {
+    const open = await read($, studios)
+    const refs = snapshotRefs(listed)
+    if (open.length > 1 && refs.length > 1) {
+      const shown = refs.filter(ref => isLive(ref, now)).slice(0, 6)
+      const entries = await describeEntries($, dir, shown.length ? shown : refs.slice(0, 6))
+      return {
+        error: `${open.length} Studios are open and none is targeted, so I won't guess which tree to search. Pass studio_id, place_id or session. Snapshots:\n${describeSnapshots(entries, now)}`,
+      }
+    }
+    place = refs[0]?.place ?? ''
+  }
+  if (place && !/^[A-Za-z0-9_-]+$/.test(place)) return { error: `"${place}" is not a place id.` }
+
+  let pick = pickSnapshot(listed, place, now, session)
+  if (!pick.ref && place.startsWith('local-')) {
+    // The plugin names an unsaved place by game.Name, which the Studio list may spell differently.
+    const local = snapshotRefs(listed).filter(ref => ref.place.startsWith('local-'))
+    if (local.length) pick = pickSnapshot(listed, local[0]!.place, now)
+  }
+  if (!pick.ref) return { error: await noSnapshot($, dir, session ? `session ${session}` : place ? `place ${place}` : '') }
+  return { file: `${dir}/${pick.ref.file}`, place: pick.ref.place, note: pick.note }
+}
+
+async function describeEntries($: $, dir: string, refs: ReturnType<typeof snapshotRefs>) {
+  // BSD head (macOS) has no -q, so read each file's first line on its own.
+  const heads = await Promise.all(refs.map(ref => $.process.run(['head', '-n', '1', `${dir}/${ref.file}`], { timeoutMs: 5000 })))
+  return refs.map((ref, index) => ({ ref, header: parseHeader(heads[index]?.stdout.trim() ?? '') }))
+}
+
+async function noSnapshot($: $, dir: string, what: string): Promise<string> {
+  await ensureTreeListener($)
+  const listening = await isTreeListening($)
+  return [
+    `No tree snapshot${what ? ` for ${what}` : ''} in ${dir}.`,
+    listening
+      ? 'The listener is running; the Studio Tree plugin in that Studio has not sent a tree yet (installed? HTTP allowed for 127.0.0.1?).'
+      : `The listener is not running${treeNote ? `: ${treeNote}` : '.'}`,
+    'Use search_game_tree with path and max_depth 10 meanwhile; its default depth of 3 hides nested matches.',
+  ].join(' ')
 }
 
 async function treeSearch($: $, args: Record<string, unknown>): Promise<{ text: string; isError: boolean }> {
   const query = makeQuery(args)
-  const place = await treePlace($, args.place_id)
-  const dir = await treeDir($)
-  const file = `${dir}/${place}.tsv`
-  if (!place || !/^[A-Za-z0-9_-]+$/.test(place) || !(await $.fs.exists(file))) {
-    await ensureTreeListener($)
-    const listening = await isTreeListening($)
-    return {
-      isError: true,
-      text: [
-        `No tree snapshot${place ? ` for place ${place}` : ''} in ${dir}.`,
-        listening
-          ? 'The listener is running; the Studio Tree plugin in that Studio has not sent a tree yet (installed? HTTP allowed for 127.0.0.1?).'
-          : `The listener is not running${treeNote ? `: ${treeNote}` : '.'}`,
-        'Use search_game_tree with path and max_depth 10 meanwhile; its default depth of 3 hides nested matches.',
-      ].join(' '),
-    }
-  }
+  const target = await resolveTree($, args)
+  if ('error' in target) return { isError: true, text: target.error }
+  const { file, place } = target
   const argv = grepArgs(query, file)
   if (!argv) return { isError: true, text: 'Give query, under, class_name, tag, attribute, text or group_by.' }
   const [head, found] = await Promise.all([
@@ -545,11 +614,13 @@ async function treeSearch($: $, args: Record<string, unknown>): Promise<{ text: 
   const result = search(found.stdout, query)
   const header = parseHeader(head.stdout.trim())
   const usesV2 = query.tags.length > 0 || query.attribute !== '' || query.text !== ''
-  const note =
+  const notes = [
+    target.note,
     header && header.version < 2 && usesV2
       ? 'This snapshot has no tags, attributes or text yet: restart Roblox Studio so the updated Studio Tree plugin sends a new one.'
-      : ''
-  return { isError: false, text: formatResults(header, place, result, isCapped, await $.clock.now(), note) }
+      : '',
+  ].filter(Boolean)
+  return { isError: false, text: formatResults(header, place, result, isCapped, await $.clock.now(), notes.join('\n')) }
 }
 
 function hashText(text: string): string {
@@ -630,7 +701,9 @@ export const register: Register = on => {
           fold: { type: 'boolean', description: 'Collapse numbered siblings and fold matches below a match; default true' },
           group_by: { type: 'string', enum: ['class', 'parent'], description: 'Return counts per class or per parent instead of rows' },
           details: { type: 'boolean', description: 'Show tags, attribute names, text and script line counts on every row; default only what a filter asked for' },
-          place_id: { type: 'string', description: 'Place to search; defaults to the Studio last targeted, else the newest snapshot' },
+          studio_id: { type: 'string', description: 'Studio (from list_roblox_studios) whose place to search; defaults to the Studio last targeted' },
+          place_id: { type: 'string', description: 'Place to search instead of a Studio\'s' },
+          session: { type: 'string', description: 'Snapshot of one Studio when several have the same place open (the answer names the sessions)' },
           limit: { type: 'number', description: 'Rows to return; default 50, max 500' },
         },
       },
@@ -696,6 +769,8 @@ export const register: Register = on => {
         const known = await read($, studios)
         if (list.length) {
           await update($, studios, () => list.map(s => ({ ...s, mode: known.find(k => k.id === s.id)?.mode ?? null })))
+          listFailures = 0
+          lastListedAt = Date.now()
         }
       }
       return ran

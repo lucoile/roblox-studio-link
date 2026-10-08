@@ -14,6 +14,7 @@ local PORT = 34950
 local QUIET_SECONDS = 3
 local RETRY_SECONDS = 15
 local FULL_RESYNC_SECONDS = 300
+local HEARTBEAT_SECONDS = 30
 local MAX_DELTA_ROOTS = 30
 local FORMAT = "# studio-tree 2"
 local ROOT_SEPARATOR = "\u{1F}"
@@ -62,6 +63,13 @@ local function placeKey(): string
 	end
 	local name = game.Name:gsub("[^%w_-]", "_"):sub(1, 60)
 	return "local-" .. name
+end
+
+-- One id per Studio process, so two Studios on the same place keep separate snapshots.
+local session = HttpService:GenerateGUID(false):gsub("[^%x]", ""):sub(1, 8):lower()
+
+local function snapshotUrl(path: string): string
+	return `http://127.0.0.1:{PORT}{path}?place={placeKey()}&session={session}`
 end
 
 local function getService(name: string): Instance?
@@ -177,7 +185,7 @@ end
 
 local function post(body: string): (boolean, number, string)
 	local ok, response = pcall(HttpService.RequestAsync, HttpService, {
-		Url = `http://127.0.0.1:{PORT}/tree?place={placeKey()}`,
+		Url = snapshotUrl("/tree"),
 		Method = "POST",
 		Headers = { ["Content-Type"] = "text/plain", ["X-Studio-Tree"] = "1" },
 		Body = body,
@@ -294,6 +302,26 @@ for _, signalName in { "OnRecordingFinished", "OnUndo", "OnRedo" } do
 	end
 end
 
+-- A heartbeat tells the listener this Studio is still open. A 404 means it lost the snapshot (a restart): send it again.
+local function heartbeat()
+	local ok, response = pcall(HttpService.RequestAsync, HttpService, {
+		Url = snapshotUrl("/ping"),
+		Method = "PUT",
+		Headers = { ["X-Studio-Tree"] = "1" },
+	})
+	if ok and response.StatusCode == 404 then
+		markFullDirty()
+	end
+end
+
+plugin.Unloading:Connect(function()
+	pcall(HttpService.RequestAsync, HttpService, {
+		Url = snapshotUrl("/tree"),
+		Method = "DELETE",
+		Headers = { ["X-Studio-Tree"] = "1" },
+	})
+end)
+
 local toolbar = plugin:CreateToolbar("Studio Tree")
 local button = toolbar:CreateButton("Send tree", "Send this place's instance tree to Claude now", "")
 button.ClickableWhenViewportHidden = true
@@ -306,11 +334,15 @@ button.Click:Connect(function()
 end)
 
 task.spawn(function()
+	local nextHeartbeat = os.clock() + HEARTBEAT_SECONDS
 	while true do
 		task.wait(1)
 		local now = os.clock()
 		if dirtyAt and not isSending and now - dirtyAt >= QUIET_SECONDS and now >= retryAt then
 			send()
+		elseif not isSending and now >= nextHeartbeat then
+			nextHeartbeat = now + HEARTBEAT_SECONDS
+			heartbeat()
 		end
 	end
 end)
